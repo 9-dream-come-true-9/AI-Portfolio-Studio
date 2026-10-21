@@ -124,7 +124,7 @@ module.exports = async function handler(req, res) {
   }
 
   const apiBase = String(process.env.AI_API_BASE || 'https://token-plan-cn.xiaomimimo.com/v1').replace(/\/+$/, '');
-  const model = process.env.AI_MODEL || 'mimo-v2.5';
+  const model = resolveModel(apiBase, process.env.AI_MODEL);
   const configuredCompletionTokens = readBoundedInteger(
     process.env.AI_MAX_COMPLETION_TOKENS,
     DEFAULT_MAX_COMPLETION_TOKENS,
@@ -217,7 +217,8 @@ module.exports = async function handler(req, res) {
       if (!upstream.ok) {
         await upstream.text().catch(() => '');
         if (!responseStarted) {
-          res.status(upstream.status).json({ error: 'AI request failed' });
+          // Provider failures must never masquerade as invalid visitor input.
+          res.status(502).json(getUpstreamFailurePayload(false));
           return;
         }
         throw new Error('AI request failed');
@@ -508,6 +509,7 @@ module.exports.isPortfolioLinkQuestion = isPortfolioLinkQuestion;
 module.exports.sanitizeConversationHistory = sanitizeConversationHistory;
 module.exports.streamModelAnswer = streamModelAnswer;
 module.exports.getThinkingOptions = getThinkingOptions;
+module.exports.resolveModel = resolveModel;
 module.exports.getCompletionTokenOptions = getCompletionTokenOptions;
 module.exports.isLikelyIncompleteAnswer = isLikelyIncompleteAnswer;
 module.exports.MAX_USER_MESSAGE_LENGTH = MAX_USER_MESSAGE_LENGTH;
@@ -520,9 +522,21 @@ module.exports.getThinkingStatusMessages = getThinkingStatusMessages;
 module.exports.getUpstreamFailurePayload = getUpstreamFailurePayload;
 module.exports.DEFAULT_UPSTREAM_TIMEOUT_MS = DEFAULT_UPSTREAM_TIMEOUT_MS;
 
+function resolveModel(apiBase, configuredModel) {
+  const model = String(configuredModel || 'mimo-v2.6-flash').trim();
+  let hostname;
+  try { hostname = new URL(apiBase).hostname; } catch (error) { return model; }
+  // MiMo V2.5 retired on 2026-10-21. Migrate stale hosted env vars too.
+  if (hostname === 'xiaomimimo.com' || hostname.endsWith('.xiaomimimo.com')) {
+    if (model === 'mimo-v2.5') return 'mimo-v2.6-flash';
+    if (model === 'mimo-v2.5-pro') return 'mimo-v2.6-pro';
+  }
+  return model;
+}
+
 function getThinkingOptions(apiBase, model) {
   const modelName = String(model || '').toLowerCase();
-  if (/^mimo-v2\.5(?:-pro)?$/.test(modelName)) {
+  if (/^mimo-v2\.(?:5(?:-pro)?|6-(?:flash|pro)(?:-ultraspeed)?)$/.test(modelName)) {
     return { thinking: { type: 'disabled' } };
   }
   return {};

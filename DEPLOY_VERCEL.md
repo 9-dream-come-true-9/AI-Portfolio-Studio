@@ -22,7 +22,7 @@ vercel.json
 ```text
 AI_API_KEY=你的模型服务 API Key
 AI_API_BASE=https://token-plan-cn.xiaomimimo.com/v1
-AI_MODEL=mimo-v2.5
+AI_MODEL=mimo-v2.6-flash
 AI_MAX_COMPLETION_TOKENS=8000
 
 # 单个 Vercel 实例内的基础限流（不是跨实例硬额度）
@@ -57,3 +57,5 @@ neocities_site/
 ```
 
 API Key 只能放 Vercel Environment Variables，不能写入 `index.html` 或 `script.js`。
+
+MiMo V2.5 已于北京时间 2026-10-21 10:00 下线。服务端对小米官方域名下遗留的 `AI_MODEL=mimo-v2.5` 自动使用 `mimo-v2.6-flash`，`mimo-v2.5-pro` 自动使用 `mimo-v2.6-pro`；其他服务商的模型配置保持原值。

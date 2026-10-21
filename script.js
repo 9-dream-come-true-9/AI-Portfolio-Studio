@@ -1955,7 +1955,7 @@
     if (status === 408 || status === 504) return '';
     if (error && error.userMessage) return error.userMessage;
     if (status === 429) return '当前访问较多或额度已达到上限，请稍后再试。';
-    if (status === 400) return (error && error.userMessage) || '请输入问题后再发送。';
+    if (status === 400 && error && error.code === 'MISSING_MESSAGE') return '请输入问题后再发送。';
     if (status === 413) return (error && error.userMessage) || ('问题请控制在 ' + maxQuestionLength + ' 个字符以内。');
     return 'AI 服务暂时不可用，请稍后再试。';
   }

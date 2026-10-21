@@ -60,14 +60,14 @@ npx vercel dev
 ```text
 AI_API_KEY=your_api_key
 AI_API_BASE=https://token-plan-cn.xiaomimimo.com/v1
-AI_MODEL=mimo-v2.5
+AI_MODEL=mimo-v2.6-flash
 AI_MAX_COMPLETION_TOKENS=8000
 CHAT_RATE_LIMIT_WINDOW_MS=60000
 CHAT_RATE_LIMIT_MAX=12
 CHAT_UPSTREAM_TIMEOUT_MS=45000
 ```
 
-其中 `AI_API_KEY` 为必填项，其余变量可按所使用的 OpenAI-compatible 模型服务调整。当前示例使用 Xiaomi MiMo Token Plan 的 `mimo-v2.5` 模型；每次请求只调用模型一次，不做自动续写。`AI_MAX_COMPLETION_TOKENS` 只控制单次回答预算；生产环境会至少使用 8000 个 completion tokens。接口仍保留单实例内存限流，默认每个实例每分钟 12 次；这不是跨 Vercel 实例的硬额度，模型供应商侧仍应设置独立 Key、日预算和余额告警。`.env` 已被 Git 忽略，请勿提交真实密钥。
+其中 `AI_API_KEY` 为必填项，其余变量可按所使用的 OpenAI-compatible 模型服务调整。当前示例使用 Xiaomi MiMo Token Plan 的 `mimo-v2.6-flash` 模型；每次请求只调用模型一次，不做自动续写。`AI_MAX_COMPLETION_TOKENS` 只控制单次回答预算；生产环境会至少使用 8000 个 completion tokens。接口仍保留单实例内存限流，默认每个实例每分钟 12 次；这不是跨 Vercel 实例的硬额度，模型供应商侧仍应设置独立 Key、日预算和余额告警。`.env` 已被 Git 忽略，请勿提交真实密钥。
 
 ## 部署
 
@@ -82,3 +82,5 @@ CHAT_UPSTREAM_TIMEOUT_MS=45000
 本仓库用于维护赵亚杰的个人作品集网站。页面中的项目数据、经历与联系方式均为个人展示内容。
 
 <!-- Push notification test: documentation-only change; no website runtime files modified. -->
+
+MiMo V2.5 已于北京时间 2026-10-21 10:00 下线。服务端对小米官方域名下遗留的 `AI_MODEL=mimo-v2.5` 自动使用 `mimo-v2.6-flash`，`mimo-v2.5-pro` 自动使用 `mimo-v2.6-pro`；其他服务商的模型配置保持原值。

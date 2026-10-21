@@ -64,7 +64,9 @@ assert.strictEqual(
   getMessage({ status: 413, userMessage: '问题请控制在 800 个字符以内。' }),
   '问题请控制在 800 个字符以内。'
 );
-assert.strictEqual(getMessage({ status: 400 }), '请输入问题后再发送。');
+assert.strictEqual(getMessage({ status: 400 }), 'AI 服务暂时不可用，请稍后再试。');
+assert.strictEqual(getMessage({ status: 400, code: 'AI request failed' }), 'AI 服务暂时不可用，请稍后再试。');
+assert.strictEqual(getMessage({ status: 400, code: 'MISSING_MESSAGE' }), '请输入问题后再发送。');
 assert.strictEqual(getMessage({ status: 429 }), '当前访问较多或额度已达到上限，请稍后再试。');
 assert.strictEqual(
   getMessage({ status: 504, userMessage: 'AI 服务响应超时，请稍后再试。' }),

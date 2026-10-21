@@ -156,6 +156,22 @@ async function runHandler(message, ip, upstreams, history) {
   delete process.env.NODE_ENV;
 
   try {
+    assert.strictEqual(handler.resolveModel('https://token-plan-cn.xiaomimimo.com/v1', 'mimo-v2.5'), 'mimo-v2.6-flash');
+    assert.strictEqual(handler.resolveModel('https://api.xiaomimimo.com/v1', 'mimo-v2.5-pro'), 'mimo-v2.6-pro');
+    assert.strictEqual(handler.resolveModel('https://other.example/v1', 'mimo-v2.5'), 'mimo-v2.5');
+    assert.strictEqual(handler.resolveModel('https://api.xiaomimimo.com.evil.example/v1', 'mimo-v2.5'), 'mimo-v2.5');
+    assert.strictEqual(handler.resolveModel('https://api.xiaomimimo.com/v1', 'custom-model'), 'custom-model');
+    assert.strictEqual(handler.resolveModel('https://api.xiaomimimo.com/v1'), 'mimo-v2.6-flash');
+    assert.deepStrictEqual(handler.getThinkingOptions('', 'mimo-v2.6-flash'), { thinking: { type: 'disabled' } });
+    const empty = await runHandler('  ', 'test-empty-input', []);
+    assert.strictEqual(empty.response.statusCode, 400);
+    assert.strictEqual(empty.response.jsonBody.code, 'MISSING_MESSAGE');
+    assert.strictEqual(empty.calls.length, 0);
+    const rejected = await runHandler('介绍一下赵亚杰', 'test-upstream-400', [createUpstream([], { ok: false, status: 400 })]);
+    assert.strictEqual(rejected.response.statusCode, 502);
+    assert.strictEqual(rejected.response.jsonBody.code, 'AI_SERVICE_UNAVAILABLE');
+    assert.strictEqual(rejected.calls[0].body.model, 'mimo-v2.6-flash');
+    assert.strictEqual(rejected.calls.length, 1);
     const guidePrompt = '请按四大模块导览赵亚杰的 AI 作品集《AI 实验室》，概括代表作品并附对应入口链接';
     assert.strictEqual(handler.isPortfolioLinkQuestion(guidePrompt), false);
     assert.strictEqual(handler.isPortfolioLinkQuestion('请给我总作品集的飞书入口'), true);
