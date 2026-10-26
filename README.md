@@ -84,3 +84,4 @@ CHAT_UPSTREAM_TIMEOUT_MS=45000
 <!-- Push notification test: documentation-only change; no website runtime files modified. -->
 
 MiMo V2.5 已于北京时间 2026-10-21 10:00 下线。服务端对小米官方域名下遗留的 `AI_MODEL=mimo-v2.5` 自动使用 `mimo-v2.6-flash`，`mimo-v2.5-pro` 自动使用 `mimo-v2.6-pro`；其他服务商的模型配置保持原值。
+ 
