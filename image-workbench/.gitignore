@@ -1,0 +1,7 @@
+__pycache__/
+*.py[cod]
+.venv/
+results/
+image-jobs/
+series-layout/
+logo-library/brand-svg/
