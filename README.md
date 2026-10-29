@@ -1,6 +1,6 @@
 # AI Portfolio Studio
 
-一个项目，两个网站：**个人简历 / 作品集**与**图片工作台**。前者展示我的 AI 产品经理与 FDE 项目和经历；后者用于本地制作与编辑商品图片。两个站点共用一个仓库，但可分别运行。
+一个项目，两个网站：**个人简历 / 作品集**与**图片工作台**。前者展示我的 AI 产品经理与 FDE 项目和经历；后者用于本地制作与编辑商品图片。
 
 | 网站 | 入口 | 运行方式 |
 | --- | --- | --- |
@@ -96,5 +96,3 @@ CHAT_UPSTREAM_TIMEOUT_MS=45000
 本仓库维护赵亚杰的个人作品集网站和图片工作台。代码采用 MIT 许可证；个人简历、肖像、品牌标识及第三方模型分别受其原有权利和许可约束。
 
 <!-- Push notification test: documentation-only change; no website runtime files modified. -->
-
-MiMo V2.5 已于北京时间 2026-10-21 10:00 下线。服务端对小米官方域名下遗留的 `AI_MODEL=mimo-v2.5` 自动使用 `mimo-v2.6-flash`，`mimo-v2.5-pro` 自动使用 `mimo-v2.6-pro`；其他服务商的模型配置保持原值。
