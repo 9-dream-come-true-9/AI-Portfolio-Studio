@@ -6,13 +6,13 @@ AI Portfolio Studio 的第二个站点，用于在浏览器中制作商品图：
 
 需要 Python 3.12 或更新版本。进入本目录后运行：
 
-```bash
+```powershell
 python -m venv .venv
-.venv/Scripts/python -m pip install -r requirements.txt
-.venv/Scripts/python server.py
+.\.venv\Scripts\python.exe -m pip install -r requirements.txt
+.\.venv\Scripts\python.exe server.py
 ```
 
-上面是 Windows 示例；macOS/Linux 请将 `.venv/Scripts/python` 改为 `.venv/bin/python`。启动后按终端提示，在本机浏览器打开工作台。端口可用 `WORKBENCH_PORT` 环境变量调整。服务只监听本机，不提供局域网访问。
+上面是 Windows 示例；macOS/Linux 请将 `.\.venv\Scripts\python.exe` 改为 `.venv/bin/python`。启动后按终端提示，在本机浏览器打开工作台。端口可用 `WORKBENCH_PORT` 环境变量调整。服务只监听本机，不提供局域网访问。
 
 不配置 AI 服务也能使用画布编辑、Logo 素材、导出和本机抠图。抠图使用仓库内的 U-2-Net 小模型；相关授权文件位于 [`models`](./models)。编辑记录保存在当前浏览器，服务生成结果与任务记录默认写在用户目录下的 `.ai-portfolio-studio/image-workbench`，不会写进仓库。
 
