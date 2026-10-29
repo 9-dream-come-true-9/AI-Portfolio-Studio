@@ -1,6 +1,13 @@
-# 赵亚杰 · AI Product Manager & FDE Portfolio
+# AI Portfolio Studio
 
-一个面向 AI 产品经理与 FDE 求职场景的个人主页，集中展示我的客户现场 AI 落地能力、Agent 与 Skill 产品经验、项目成果和联系方式。网站同时内置「AI 求职小杰君」，访客可以直接询问我的项目、经历、岗位匹配度和作品集信息。
+一个项目，两个网站：**个人简历 / 作品集**与**图片工作台**。前者展示我的 AI 产品经理与 FDE 项目和经历；后者用于本地制作与编辑商品图片。两个站点共用一个仓库，但可分别运行。
+
+| 网站 | 入口 | 运行方式 |
+| --- | --- | --- |
+| 个人简历 / 作品集 | [`index.html`](./index.html) | 静态预览，或通过 Vercel 本地开发环境运行 AI 求职助手 |
+| 图片工作台 | [`image-workbench/`](./image-workbench/) | Python 本地服务；静态预览支持部分人工编辑功能 |
+
+个人网站面向 AI 产品经理与 FDE 求职场景，集中展示客户现场 AI 落地能力、Agent 与 Skill 产品经验、项目成果和联系方式。网站内置「AI 求职小杰君」，访客可以询问项目、经历、岗位匹配度和作品集信息。
 
 [在线访问网站](https://www.zyjaiproduct.click/) · [查看飞书作品集](https://ocnlnp1ta2t2.feishu.cn/drive/folder/Wpm9fd5g4liX9Edxp3pctObYnng)
 
@@ -39,10 +46,13 @@ AI 助手通过 `/api/chat` 访问服务端函数。API Key 仅保存在部署�
 ├── script.js                    # 页面交互与 AI 助手逻辑
 ├── preloader.js                 # 首屏加载与资源预载
 ├── package.json
+├── image-workbench/              # 图片工作台：页面、本地服务、模型与使用说明
 └── vercel.json                  # Vercel 与安全响应头配置
 ```
 
 ## 本地运行
+
+### 个人网站
 
 请先安装 [Node.js](https://nodejs.org/)。
 
@@ -52,6 +62,10 @@ npx vercel dev
 ```
 
 启动后按终端提示访问本地地址。只需预览静态页面时，也可以直接打开 `index.html`；AI 助手需要通过 Vercel 本地开发环境运行。
+
+### 图片工作台
+
+按 [`image-workbench/README.md`](./image-workbench/README.md) 安装 Python 依赖并运行 `python server.py`。画布编辑、导出和本地抠图不需要 AI 密钥；AI 生图和图片顾问按需配置。工作台仅监听本机，仓库不包含本机或局域网访问地址、原服务接口地址、密钥和历史任务数据。
 
 ## 环境变量
 
@@ -79,7 +93,7 @@ CHAT_UPSTREAM_TIMEOUT_MS=45000
 
 ## 说明
 
-本仓库用于维护赵亚杰的个人作品集网站。页面中的项目数据、经历与联系方式均为个人展示内容。
+本仓库维护赵亚杰的个人作品集网站和图片工作台。代码采用 MIT 许可证；个人简历、肖像、品牌标识及第三方模型分别受其原有权利和许可约束。
 
 <!-- Push notification test: documentation-only change; no website runtime files modified. -->
 

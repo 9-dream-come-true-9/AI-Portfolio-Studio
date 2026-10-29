@@ -3,3 +3,10 @@
 !.env.example
 .vercel
 node_modules/
+__pycache__/
+*.py[cod]
+.venv/
+image-workbench/results/
+image-workbench/image-jobs/
+image-workbench/series-layout/
+image-workbench/logo-library/brand-svg/
