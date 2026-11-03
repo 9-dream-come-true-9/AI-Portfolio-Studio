@@ -8,7 +8,7 @@ const preloader = fs.readFileSync(path.join(root, 'preloader.js'), 'utf8');
 
 assert(html.includes('id="site-preloader"'), 'The site preloader markup must remain present');
 assert(html.includes('preloader.js?v=preloader-5s-3'), 'Preloader cache token must invalidate the smooth-start fix');
-assert(html.includes('startup.js?v=initial-scroll-1'), 'Startup script must run before parsing the page body');
+assert(html.includes('startup.js?v=initial-scroll-3'), 'Startup script must run before parsing the page body');
 assert(html.includes('animation: sitePreloaderProgress 5s linear forwards;'), 'Critical CSS must start the progress animation immediately');
 assert(preloader.includes('const fixedDuration = 5000;'), 'The preloader must keep its five-second duration');
 assert(preloader.includes('const recordedStartTime = Number(root.dataset.preloaderStartedAt);'), 'JavaScript must reuse the CSS animation start timestamp');
