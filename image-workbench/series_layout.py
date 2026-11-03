@@ -28,6 +28,8 @@ USER_STATE = Path(os.environ.get('WORKBENCH_DATA_DIR', str(Path.home() / '.ai-po
 STATE = Path(os.environ.get('WORKBENCH_SERIES_STATE_DIR', str(USER_STATE / 'series-layout')))
 MAX_IMAGE = 10 * 1024 * 1024
 VERSION = 3
+LAYOUT_REVISION = 5
+BACKGROUND_REVISION = 2
 LOCK = threading.RLock()
 ANALYZE_LOCK = threading.Lock()
 QUEUE = ThreadPoolExecutor(max_workers=1, thread_name_prefix='series-background')
@@ -73,7 +75,24 @@ def extract_icon(image):
     distance = np.linalg.norm(pixels-background, axis=2)
     strong = distance > max(28, float(np.percentile(distance, 90)) * .5)
     if not .015 < float(strong.mean()) < .65:
-        return image
+        # A solid colour badge is not a line icon: keep its real pixels and cut
+        # around the outer connected shape instead of returning an opaque box.
+        import cv2
+        shape_pixels = (distance > 10).astype('uint8') * 255
+        shape_pixels = cv2.morphologyEx(shape_pixels, cv2.MORPH_CLOSE, np.ones((3, 3), 'uint8'))
+        contours, _ = cv2.findContours(shape_pixels, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+        if not contours:
+            return image
+        contour = max(contours, key=cv2.contourArea)
+        fraction = cv2.contourArea(contour) / (image.width * image.height)
+        x, y, w, h = cv2.boundingRect(contour)
+        if not .08 < fraction < .95 or x < 1 or y < 1 or x+w >= image.width or y+h >= image.height:
+            return image
+        alpha = np.zeros((image.height, image.width), dtype='uint8')
+        cv2.drawContours(alpha, [contour], -1, 255, -1, lineType=cv2.LINE_AA)
+        output = np.asarray(image.convert('RGBA')).copy()
+        output[:, :, 3] = alpha
+        return Image.fromarray(output)
     foreground = np.median(pixels[strong], axis=0)
     direction = foreground-background
     alpha = np.clip(np.sum((pixels-background)*direction, axis=2) / np.maximum(np.sum(direction**2, axis=2), 1), 0, 1)
@@ -173,12 +192,7 @@ def save_json(path, value):
 
 def vision_json(source, instruction):
     import image_advisor
-    base = os.environ.get('ADVISOR_API_BASE', '').rstrip('/')
-    model = os.environ.get('ADVISOR_MODEL', '')
-    key = os.environ.get('ADVISOR_API_KEY', '')
-    parts = urllib.parse.urlsplit(base)
-    if not key or parts.scheme != 'https' or not parts.hostname or parts.username or parts.password or parts.query or parts.fragment:
-        raise RuntimeError('母图识别服务尚未配置。')
+    base, model, key = image_advisor.settings()
     payload = {'model': model, 'stream': False, 'max_completion_tokens': 9000,
                'response_format': {'type': 'json_object'},
                'thinking': {'type': 'disabled'}, 'temperature': 0,
@@ -220,14 +234,23 @@ def clean_facts(value):
             'confidence': max(0, min(1, number(value.get('confidence'))))}
 
 
-def refine_text_slots(image, slots):
-    """Use local OCR for actual pixel bounds; the vision model supplies semantics only."""
+def ocr_rows(image):
     global OCR
     import numpy as np
     from rapidocr_onnxruntime import RapidOCR
+    cached=getattr(image,'_series_ocr_rows',None)
+    if cached is not None:return cached
     if OCR is None:
         OCR = RapidOCR(intra_op_num_threads=2, inter_op_num_threads=1)
     rows, _ = OCR(np.asarray(image.convert('RGB'))[:, :, ::-1].copy())
+    image._series_ocr_rows=rows or []
+    return image._series_ocr_rows
+
+
+def refine_text_slots(image, slots):
+    """Use local OCR for actual pixel bounds; the vision model supplies semantics only."""
+    import numpy as np
+    rows=ocr_rows(image)
     if not rows:
         raise RuntimeError('母图中的文字未能准确定位，请换一张清晰母图。')
     products = [item for item in slots if item['kind'] == 'product']
@@ -238,16 +261,34 @@ def refine_text_slots(image, slots):
         left, top = min(point[0] for point in polygon), min(point[1] for point in polygon)
         right, bottom = max(point[0] for point in polygon), max(point[1] for point in polygon)
         cx, cy = (left + right) / 2, (top + bottom) / 2
-        if any(item['x'] <= cx <= item['x'] + item['w'] and item['y'] <= cy <= item['y'] + item['h'] for item in products):
-            continue
         candidates.append({'x': left, 'y': top, 'w': right - left, 'h': bottom - top, 'text': text, 'confidence': confidence})
     used = set()
     normalize = lambda value: re.sub(r'[^\w\u4e00-\u9fff]', '', value).lower()
+    refined = []
     for slot in slots:
         if slot['kind'] != 'text':
+            refined.append(slot)
             continue
         matches = []
         for line in slot['text'].splitlines():
+            # OCR may split one line at separators, tracking or colour changes.
+            # Match the complete sequence before choosing a single closest word.
+            pieces=[]
+            for index,candidate in enumerate(candidates):
+                if index in used:continue
+                value=normalize(candidate['text'])
+                cx,cy=candidate['x']+candidate['w']/2,candidate['y']+candidate['h']/2
+                if len(value)>=2 and value in normalize(line) and slot['y']-20<=cy<=slot['y']+slot['h']+20:
+                    pieces.append((index,candidate))
+            if len(pieces)>1:
+                pieces.sort(key=lambda item:item[1]['x'])
+                joined=''.join(item[1]['text'] for item in pieces)
+                if SequenceMatcher(None,normalize(line),normalize(joined)).ratio()>=.8:
+                    for index,_ in pieces:used.add(index)
+                    left=min(c['x'] for _,c in pieces);top=min(c['y'] for _,c in pieces)
+                    right=max(c['x']+c['w'] for _,c in pieces);bottom=max(c['y']+c['h'] for _,c in pieces)
+                    matches.append({'x':left,'y':top,'w':right-left,'h':bottom-top,'text':line,'originalText':line,'confidence':min(c['confidence'] for _,c in pieces)})
+                    continue
             scored = []
             for index, candidate in enumerate(candidates):
                 if index in used:
@@ -262,27 +303,49 @@ def refine_text_slots(image, slots):
             if scored:
                 _, index, candidate = max(scored, key=lambda value: value[0])
                 used.add(index)
-                matches.append(candidate)
+                matches.append({**candidate, 'originalText': line})
         if not matches:
             slot['confidence'] = min(slot['confidence'], .45)
+            refined.append(slot)
             continue
-        left = max(0, math.floor(min(item['x'] for item in matches)) - 3)
-        top = max(0, math.floor(min(item['y'] for item in matches)) - 3)
-        right = min(image.width, math.ceil(max(item['x'] + item['w'] for item in matches)) + 3)
-        bottom = min(image.height, math.ceil(max(item['y'] + item['h'] for item in matches)) + 3)
-        slot.update(x=left, y=top, w=right-left, h=bottom-top, confidence=min(item['confidence'] for item in matches))
-        glyph_heights = [item['h'] for item in matches]
-        slot['fontSize'] = round(float(np.median(glyph_heights)) * .98, 1)
-        if len(matches) > 1:
-            baselines = sorted(item['y'] for item in matches)
-            slot['lineHeight'] = round(max(1, min(2, float(np.median(np.diff(baselines))) / slot['fontSize'])), 3)
-        pixels = np.asarray(image.convert('RGB').crop((left, top, right, bottom))).reshape(-1, 3).astype('int16')
-        expected = np.array([int(slot['color'][index:index+2], 16) for index in (1, 3, 5)])
-        close = pixels[np.linalg.norm(pixels - expected, axis=1) < 65]
-        if len(close):
-            color = np.median(close, axis=0).astype('uint8')
-            slot['color'] = '#' + ''.join(f'{value:02x}' for value in color)
-    return slots
+        groups = [matches]
+        heights = [item['h'] for item in matches]
+        if len(matches) == len(slot['text'].splitlines()) and max(heights) / max(1, min(heights)) > 1.25:
+            groups = []
+            for match in matches:
+                if not groups or max(match['h'], groups[-1][0]['h']) / max(1, min(match['h'], groups[-1][0]['h'])) > 1.2:
+                    groups.append([])
+                groups[-1].append(match)
+        for group_index, group in enumerate(groups):
+            piece = dict(slot)
+            if len(groups) > 1:
+                piece['id'] = slot['id'] if group_index == 0 else slot['id'][:48] + f'-part-{group_index + 1}'
+                piece['label'] = slot['label'] + f' {group_index + 1}'
+                piece['text'] = '\n'.join(item['originalText'] for item in group)
+                piece['sourceSlotId'] = slot['id']
+                piece['originalText'] = slot['text']
+                piece['originalBox'] = {key: slot[key] for key in ('x', 'y', 'w', 'h')}
+                piece['originalFontSize'] = slot['fontSize']
+                if max(item['h'] for item in group) < max(heights) * .8:
+                    piece['fontWeight'] = 400
+            left = max(0, math.floor(min(item['x'] for item in group)) - 3)
+            top = max(0, math.floor(min(item['y'] for item in group)) - 3)
+            right = min(image.width, math.ceil(max(item['x'] + item['w'] for item in group)) + 3)
+            bottom = min(image.height, math.ceil(max(item['y'] + item['h'] for item in group)) + 3)
+            piece.update(x=left, y=top, w=right-left, h=bottom-top, confidence=min(item['confidence'] for item in group), maxLines=len(group))
+            piece['fontSize'] = round(float(np.median([item['h'] for item in group])) * .98, 1)
+            piece['lineHeight'] = 1.2
+            if len(group) > 1:
+                baselines = sorted(item['y'] for item in group)
+                piece['lineHeight'] = round(max(1, min(2, float(np.median(np.diff(baselines))) / piece['fontSize'])), 3)
+            pixels = np.asarray(image.convert('RGB').crop((left, top, right, bottom))).reshape(-1, 3).astype('int16')
+            expected = np.array([int(piece['color'][index:index+2], 16) for index in (1, 3, 5)])
+            close = pixels[np.linalg.norm(pixels - expected, axis=1) < 65]
+            if len(close):
+                color = np.median(close, axis=0).astype('uint8')
+                piece['color'] = '#' + ''.join(f'{value:02x}' for value in color)
+            refined.append(piece)
+    return refined
 
 
 def normalize_slots(items, width, height):
@@ -331,13 +394,21 @@ def normalize_slots(items, width, height):
     if len(products) > 4:
         raise ValueError('母图商品过多，请使用最多四个商品主体的母图。')
     # Packaging is never promoted to editable marketing text, even if the model returns it.
+    masks=[]
+    for raw in items:
+        if not isinstance(raw,dict) or raw.get('kind')!='product' or raw.get('geometryVersion',0)<2 or not raw.get('productSrc') or not raw.get('sourceBox'):continue
+        from series_preserve import decode_asset
+        sourcebox=raw['sourceBox'];alpha=decode_asset(raw['productSrc']).getchannel('A')
+        if not isinstance(sourcebox,dict) or any(not 0<number(sourcebox.get(k))<=max(width,height) for k in ('w','h')):raise ValueError('商品抠图位置无效，请重新识别母图。')
+        mask=Image.new('L',(width,height));mask.paste(alpha.resize((round(sourcebox['w']),round(sourcebox['h'])),Image.Resampling.LANCZOS),(round(sourcebox['x']),round(sourcebox['y'])));masks.append(mask)
     filtered = []
     for slot in slots:
         inside = False
         if slot['kind'] == 'text':
-            for product in products:
-                overlap = max(0, min(slot['x'] + slot['w'], product['x'] + product['w']) - max(slot['x'], product['x'])) * max(0, min(slot['y'] + slot['h'], product['y'] + product['h']) - max(slot['y'], product['y']))
-                if overlap / (slot['w'] * slot['h']) > .6:
+            for mask in masks:
+                from PIL import ImageStat
+                crop=mask.crop((slot['x'],slot['y'],slot['x']+slot['w'],slot['y']+slot['h']))
+                if ImageStat.Stat(crop).mean[0]/255 > .6:
                     inside = True
         if not inside:
             filtered.append(slot)
@@ -357,6 +428,47 @@ def product_facts(data):
         return result
 
 
+def exclude_packaging_text(slots,width,height):
+    # Keep the rich geometry/source metadata. normalize_slots is the shared
+    # validator used by preserve(), and removes OCR text inside the true alpha.
+    allowed={slot['id'] for slot in normalize_slots(slots,width,height)}
+    return [slot for slot in slots if slot['id'] in allowed]
+
+
+def migrate_cached_analysis(image, source, result):
+    """Repair legacy geometry locally, retaining any already-paid clean background."""
+    if result.get('layoutRevision', 0) >= 4:
+        result['slots']=exclude_packaging_text(result['slots'],*image.size)
+        result['layoutRevision']=LAYOUT_REVISION
+        return result
+    old_slots = normalize_slots(result['slots'], *image.size)
+    old_key = fingerprint({'version': VERSION, 'image': source, 'slots': old_slots})
+    result['slots'] = refine_text_slots(image, result['slots'])
+    for slot in result['slots']:
+        if slot['kind'] == 'image':
+            box = (slot['x'], slot['y'], slot['x']+slot['w'], slot['y']+slot['h'])
+            slot['imageSrc'] = data_url(extract_icon(image.crop(box)))
+    result['layoutRevision'] = LAYOUT_REVISION
+    new_slots = normalize_slots(result['slots'], *image.size)
+    new_key = fingerprint({'version': VERSION, 'image': source, 'slots': new_slots})
+    if new_key != old_key:
+        with LOCK:
+            path = STATE / 'jobs' / (old_key + '.json')
+            background = STATE / 'backgrounds' / (old_key + '.png')
+            target = STATE / 'jobs' / (new_key + '.json')
+            if path.is_file() and background.is_file() and not target.exists():
+                old_job = json.loads(path.read_text(encoding='utf-8'))
+                if old_job.get('status') == 'succeeded':
+                    new_background = STATE / 'backgrounds' / (new_key + '.png')
+                    temp = new_background.with_suffix('.' + uuid.uuid4().hex + '.tmp')
+                    temp.write_bytes(background.read_bytes())
+                    os.replace(temp, new_background)
+                    updated = {**old_job, 'id': new_key, 'derivedFrom': old_key}
+                    save_json(target, updated)
+                    JOBS[new_key] = updated
+    return result
+
+
 def analyze(data):
     image = decode_image(data.get('image') if isinstance(data, dict) else None)
     source = data_url(image)
@@ -365,7 +477,12 @@ def analyze(data):
     cache = STATE / 'analysis' / (key + '.json')
     with ANALYZE_LOCK:
         if cache.is_file():
-            return json.loads(cache.read_text(encoding='utf-8'))
+            result = migrate_cached_analysis(image, source, json.loads(cache.read_text(encoding='utf-8')))
+            if not data.get('cacheOnly'):result=upgrade_product_geometry(image,source,result)
+            save_json(cache, result)
+            return result
+        if isinstance(data, dict) and data.get('cacheOnly') is True:
+            raise ValueError('未找到这张母图的已保存分析，未调用模型。请保留当前母图，或主动重新解析。')
         instruction = f'''解析这张 {width}×{height} 像素电商母图，提取商品主体、所有可替换的外部文案、与功效卖点对应的语义图标，用于固定排版。坐标必须为原图像素，不是0-1000归一化；x/y为左上角，w/h为宽高。
 返回JSON {{"slots":[{{"id":"product-1","kind":"product","role":"product","label":"商品","x":0,"y":0,"w":100,"h":100,"confidence":0.95}},{{"id":"text-1","kind":"text","role":"headline","label":"主标题","x":0,"y":0,"w":100,"h":100,"text":"逐字识别原文","fontSize":32,"color":"#123456","fontWeight":700,"align":"left","lineHeight":1.2,"confidence":0.95}}],"productFacts":{{"capacity":"包装上单件容量及单位，看不清为空","name":"包装品名","confidence":0.9}},"warnings":[]}}
 规则：1. 商品框紧贴完整商品（含瓶盖/泵头），不包括背景、地面阴影或旁边装饰。多个商品分别框选。2. 绝不把瓶身或包装上的品牌、容量、文字拆为text槽；这些只能存在productFacts中。3. 外部商品名称role=name，规格/容量/数量角标文字role=spec，主标题role=headline，功效和卖点role=benefit，适用对象role=audience，其余role=other。保留店铺LOGO/水印，不要作为替换槽。4. 每段同字号同颜色文案单独一槽。多个功效图文组分别识别标题、说明文字，图标不框入文字槽。多行主标题可合为一个槽并保留换行。不要把不同颜色、字号的文字合并。5. 文字框紧贴文字墨迹，稍留2-4像素抗锯齿余量，不能框入周边边框/图标。fontSize是原像素下的字体大小。6. 必须识别图片外部所有完整可见文案，避免遗漏；看不清的内容加入warnings，不编造。7. 每个表达功效或卖点的独立图标（例如毛囊、发丝、盾牌等）必须额外返回kind=image、role=icon的槽，id如icon-1，label为其语义。完整包含图标线条及其圆形外框，不包含旁边文字。普通装饰植物/背景道具不拆槽。'''
@@ -404,14 +521,103 @@ def analyze(data):
                 slot['productSrc'] = data_url(cutout)
             except (ValueError, RuntimeError, ImportError):
                 warnings.append('商品自动抠图未完成，请上传对应商品透明图后再批量制作。')
-        result = {'version': VERSION, 'analysisId': key, 'width': width, 'height': height, 'slots': slots,
+        result = {'version': VERSION, 'layoutRevision': LAYOUT_REVISION, 'analysisId': key, 'width': width, 'height': height, 'slots': slots,
                   'productFacts': clean_facts(result.get('productFacts')), 'warnings': warnings}
+        # Retain completed semantic/OCR work if a later contour validation fails.
+        # A refinement retry must not repay for the same successful analysis.
+        save_json(cache,result)
+        result=upgrade_product_geometry(image,source,result)
         save_json(cache, result)
         return result
 
 
+def cached_geometry_response(grid,instruction,point_version,validate=None):
+    """Only reusable, validated replies enter the active point cache."""
+    from series_segmentation import PointPromptError
+    key=fingerprint({'version':point_version,'grid':grid,'instruction':instruction});path=STATE/'geometry-prompts'/(key+'.json')
+    if path.is_file():
+        try:
+            cached=json.loads(path.read_text(encoding='utf8'))
+            if validate:validate(cached)
+            return cached
+        except (PointPromptError,ValueError,TypeError):
+            rejected=STATE/'geometry-prompts-rejected'/(key+'.'+uuid.uuid4().hex+'.json')
+            rejected.parent.mkdir(parents=True,exist_ok=True);os.replace(path,rejected)
+    for attempt in range(2 if validate else 1):
+        response=vision_json(grid,instruction if attempt==0 else instruction+'\n上次回复格式或编号无效。请重新核对图上实际采样点，前景和背景各至少2个互不冲突的有效编号，商品id完整，严格返回上述JSON。')
+        try:
+            if validate:validate(response)
+        except PointPromptError:
+            if attempt==0:continue
+            raise
+        save_json(path,response)
+        return response
+
+
+def upgrade_product_geometry(image, source, result):
+    previous_key=fingerprint({'version':VERSION,'image':source,'slots':normalize_slots(result['slots'],*image.size)})
+    products=[slot for slot in result['slots'] if slot['kind']=='product']
+    from series_segmentation import segment,VERSION as single_version,MULTI_VERSION
+    geometry_version=MULTI_VERSION if len(products)>1 else single_version
+    if all(slot.get('geometryVersion',0)>=geometry_version and slot.get('geometryMaskRevision')==2 for slot in products):
+        upgraded=result['slots']
+    else:
+        from series_geometry import from_mask
+        point_version=3 if len(products)>1 else 4
+        def cached_points(grid,instruction):return cached_geometry_response(grid,instruction,point_version)
+        cached_points.validated=lambda grid,instruction,validate:cached_geometry_response(grid,instruction,point_version,validate)
+        masks=segment(image,products,cached_points,data_url)
+        upgraded=[from_mask(image,slot,masks[slot['id']],data_url) if slot['kind']=='product' else slot for slot in result['slots']]
+    if result.get('textRecoveryVersion')!=1:
+        upgraded=complete_external_text(image,refine_text_slots(image,upgraded))
+    upgraded=exclude_packaging_text(upgraded,*image.size)
+    updated={**result,'slots':upgraded,'geometryVersion':geometry_version,'textRecoveryVersion':1,'layoutRevision':LAYOUT_REVISION}
+    next_key=fingerprint({'version':VERSION,'image':source,'slots':normalize_slots(updated['slots'],*image.size)})
+    reuse_background(previous_key,next_key)
+    return updated
+
+
+def reuse_background(previous,current):
+    if previous==current:return
+    with LOCK:
+        path=STATE/'jobs'/(previous+'.json');background=STATE/'backgrounds'/(previous+'.png');target=STATE/'jobs'/(current+'.json')
+        if not path.is_file() or not background.is_file() or target.exists():return
+        job=json.loads(path.read_text(encoding='utf8'))
+        if job.get('status')!='succeeded':return
+        destination=STATE/'backgrounds'/(current+'.png');destination.write_bytes(background.read_bytes())
+        updated={**job,'id':current,'derivedFrom':previous};save_json(target,updated);JOBS[current]=updated
+
+
+def complete_external_text(image,slots):
+    """Recover complete external captions omitted by a coarse semantic rectangle."""
+    import numpy as np
+    from series_preserve import decode_asset
+    rows=ocr_rows(image)
+    mask=Image.new('L',image.size)
+    for slot in slots:
+        if slot['kind']!='product':continue
+        box=slot.get('sourceBox');alpha=decode_asset(slot['productSrc']).getchannel('A')
+        if box:mask.paste(alpha,(round(box['x']),round(box['y'])))
+    mask=np.asarray(mask);result=list(slots)
+    for polygon,text_value,confidence in rows or []:
+        if confidence<.8:continue
+        left=max(0,math.floor(min(p[0] for p in polygon))-3);top=max(0,math.floor(min(p[1] for p in polygon))-3)
+        right=min(image.width,math.ceil(max(p[0] for p in polygon))+3);bottom=min(image.height,math.ceil(max(p[1] for p in polygon))+3)
+        if right<=left or bottom<=top or float((mask[top:bottom,left:right]>128).mean())>.55:continue
+        area=(right-left)*(bottom-top)
+        covered=any(s['kind']=='text' and max(0,min(right,s['x']+s['w'])-max(left,s['x']))*max(0,min(bottom,s['y']+s['h'])-max(top,s['y']))/area>.5 for s in slots)
+        if covered:continue
+        pixels=np.asarray(image.crop((left,top,right,bottom)).convert('RGB'));gray=np.mean(pixels,axis=2);bright=np.median(gray)>128
+        ink=pixels[gray<np.percentile(gray,30)] if bright else pixels[gray>np.percentile(gray,70)]
+        color=np.median(ink.reshape(-1,3),axis=0).astype('uint8') if ink.size else np.array([34,34,34])
+        identity='text-auto-'+hashlib.sha1((text_value+str([left,top,right,bottom])).encode()).hexdigest()[:12]
+        result.append({'id':identity,'kind':'text','role':'other','label':text_value[:16],'x':left,'y':top,'w':right-left,'h':bottom-top,'text':text_value,'fontSize':round((bottom-top-6)*.98,1),'fontWeight':400,'color':'#'+''.join(f'{c:02x}' for c in color),'align':'left','lineHeight':1.2,'maxLines':1,'confidence':float(confidence)})
+    return result
+
+
 def public_job(job):
     result = {key: job[key] for key in ('id', 'status')}
+    result['backgroundRevision']=job.get('backgroundRevision',1)
     if job['status'] == 'succeeded':
         path = STATE / 'backgrounds' / (job['id'] + '.png')
         if not path.is_file():
@@ -422,6 +628,20 @@ def public_job(job):
         result['error'] = job.get('error', '底图准备未完成。')
         result['retryable'] = bool(job.get('retryable'))
     return result
+
+
+def preserve(data):
+    """No model call: prepare narrowly masked patches for a lossless source canvas."""
+    from series_preserve import build
+    image=decode_image(data.get('image'))
+    background=decode_image(data.get('background'))
+    slots=normalize_slots(data.get('slots'),*image.size)
+    originals={slot.get('id'):slot for slot in data['slots'] if isinstance(slot,dict)}
+    for slot in slots:
+        original=originals.get(slot['id'],{})
+        for key in ('productSrc','imageSrc','sourceBox'):
+            if key in original:slot[key]=original[key]
+    return build(image,background,slots,decode_image)
 
 
 def stored_job(job_id):
@@ -452,25 +672,45 @@ def prepare(data):
     image = decode_image(data.get('image') if isinstance(data, dict) else None)
     slots = normalize_slots(data.get('slots'), *image.size)
     source = data_url(image)
-    key = fingerprint({'version': VERSION, 'image': source, 'slots': slots})
+    if data.get('backgroundRevision')!=BACKGROUND_REVISION:
+        raise ValueError('固定排版服务已更新，请刷新网页后再识别母图。')
+    mask=product_mask(image,data['slots'])
+    key = fingerprint({'version': VERSION, 'backgroundRevision':BACKGROUND_REVISION,'image': source, 'mask':hashlib.sha256(mask.tobytes()).hexdigest()})
+    mask_source=data_url(mask.convert('RGB'))
     with LOCK:
         existing = stored_job(key)
         if existing:
             if existing['status'] == 'failed' and existing.get('retryable') and data.get('retry') is True:
                 existing.update(status='queued', error='', retryable=False)
                 save_json(STATE / 'jobs' / (key + '.json'), existing)
-                QUEUE.submit(run_prepare, key, source, slots)
+                QUEUE.submit(run_prepare, key, source, mask_source)
             return public_job(existing)
         if sum(item['status'] in ('queued', 'running') for item in JOBS.values()) >= 2:
             raise RuntimeError('正在准备其他母图，请稍后再试。')
-        job = {'id': key, 'status': 'queued', 'width': image.width, 'height': image.height}
+        job = {'id': key, 'status': 'queued', 'width': image.width, 'height': image.height,'backgroundRevision':BACKGROUND_REVISION}
         save_json(STATE / 'jobs' / (key + '.json'), job)
         JOBS[key] = job
-        QUEUE.submit(run_prepare, key, source, slots)
+        QUEUE.submit(run_prepare, key, source, mask_source)
         return public_job(job)
 
 
-def run_prepare(key, source, slots):
+def product_mask(image,slots):
+    from PIL import ImageChops
+    from series_preserve import decode_asset
+    mask=Image.new('L',image.size)
+    products=[slot for slot in slots if isinstance(slot,dict) and slot.get('kind')=='product']
+    if not products:raise ValueError('母图中没有可替换商品。')
+    for slot in products:
+        if slot.get('geometryVersion',0)<2 or not slot.get('productSrc') or not slot.get('sourceBox'):raise ValueError('请先完整识别商品轮廓，再固定母图。')
+        box=slot['sourceBox'];alpha=decode_asset(slot['productSrc']).getchannel('A')
+        if not isinstance(box,dict):raise ValueError('商品抠图位置无效，请重新识别母图。')
+        x,y,w,h=[round(number(box.get(k),-1)) for k in ('x','y','w','h')]
+        if x<0 or y<0 or w<1 or h<1 or x+w>image.width or y+h>image.height or alpha.size!=(w,h):raise ValueError('商品轮廓位置与母图不匹配。')
+        part=Image.new('L',image.size);part.paste(alpha,(x,y));mask=ImageChops.lighter(mask,part)
+    return mask
+
+
+def run_prepare(key, source, mask_source):
     import image_client
     with LOCK:
         job = JOBS[key]
@@ -479,23 +719,23 @@ def run_prepare(key, source, slots):
     try:
         original = decode_image(source)
         width, height = original.size
-        regions = [{'kind': item['kind'], 'x': item['x'], 'y': item['y'], 'w': item['w'], 'h': item['h'],
-                    **({'text': item['text']} if item['kind'] == 'text' else {})} for item in slots]
-        prompt = f'''为这张{width}×{height}电商母图制作一张可复用的干净底图。删除全部商品主体及其投影/倒影，删除列出的广告文字和语义图标（kind=image）；把空出位置自然补成背后的背景。绝不新增商品、文字、图标或装饰。保持原图画幅、背景整体色彩与渐变、光影、台面、几何边框、文字容器/规格角标底色、背景植物与装饰道具的原位置和外观。保留未列出的店铺LOGO/水印。像素区域清单：{json.dumps(regions, ensure_ascii=False)}。完成后每张系列图片都会复用这同一张底图，商品和文案由程序绘制。输出整张干净背景，严禁保留文字残影、商品残影；无须解释。'''
+        prompt = '''编辑图一，制作商品替换所需的底图。图二是定位遮罩，白色指示图一中必须移除的商品软管或瓶子，黑色是其余区域。
+只移除图一中这些商品以及紧贴商品的投影/倒影，让原位置自然补成背后的真实场景；看不见的乳霜和背景纹理按周围形态连续补齐。
+必须保留图一的全部广告文字、品牌名、容量角标及其圆形边框、功效图标、照片插图、乳霜涂抹、台面和其他装饰。它们的位置、大小、文字内容、颜色和图层关系都保持原样，不得删改、重排或润色。保留照片信息卡片及其边框。
+禁止出现新商品、旧商品残影、新文字、新徽章。不要输出黑白遮罩，只输出与图一构图一致的完整图片。'''
         ratio = width / height
         size = '1024*1536' if ratio < .82 else '1536*1024' if ratio > 1.22 else '2048*2048' if max(width, height) > 1600 else '1024*1024'
         if job.get('imageRecordId'):
             record = {'id': job['imageRecordId']}
         else:
-            record = image_client.generate(prompt, [source], size)
+            record = image_client.generate(prompt, [source,mask_source], size)
         with LOCK:
             job['imageRecordId'] = record['id']
             save_json(STATE / 'jobs' / (key + '.json'), job)
         generated = Image.open(image_client.RESULTS / (record['id'] + '.png')).convert('RGBA').resize(original.size, Image.Resampling.LANCZOS)
-        # Keep the entire once-cleaned background. Rectangular copies back onto the
-        # original introduce seams in gradients/reflections. Every row reuses these
-        # exact same pixels after the user reviews the reconstructed master.
-        background = restore_text_containers(original, generated, slots)
+        # This is a repair source under the product mask. The editor retains the
+        # original master everywhere else, including all original typography.
+        background = generated
         output = STATE / 'backgrounds' / (key + '.png')
         output.parent.mkdir(parents=True, exist_ok=True)
         temp = output.with_suffix('.' + uuid.uuid4().hex + '.tmp')

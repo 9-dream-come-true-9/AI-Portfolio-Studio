@@ -20,9 +20,8 @@ USER_STATE = Path(os.environ.get('WORKBENCH_DATA_DIR', str(Path.home() / '.ai-po
 image_api.RESULTS = USER_STATE / 'results'
 RESULTS = image_api.RESULTS
 PORT = int(os.environ.get('WORKBENCH_PORT', 8767))
-VERSION = '3.6.2-open-source'
+VERSION = '3.6.6-open-source'
 BIND_HOST = 'localhost'
-ALLOWED_HOSTS = {'localhost'}
 SIZES = ('1024*1024', '1024*1536', '1536*1024', '2048*2048')
 MAX_REQUEST = 44 * 1024 * 1024
 MAX_IMAGE = 10 * 1024 * 1024
@@ -128,6 +127,8 @@ def friendly_error(exc):
         if exc.code in ('DataInspectionFailed', 'ContentPolicyViolation'):
             return '请调整图片或描述后再试。'
         if exc.status == 429:
+            if '模型通道暂时不可用' in str(exc.message):
+                return '当前图片模型通道暂时不可用，请稍后重试或联系服务商。'
             return '当前请求较多，请稍后重试。'
         if exc.code == 'ConnectionFailed':
             return '图片服务连接中断，任务结果尚不确定，请先联系管理员确认后再试。'
@@ -195,16 +196,20 @@ class Handler(BaseHTTPRequestHandler):
         self.reply(json.dumps(value, ensure_ascii=False).encode('utf-8'), status=status)
 
     def allowed(self):
-        port = self.server.server_port
         authority = self.headers.get('Host', '').lower()
         try:
             parsed = urllib.parse.urlsplit('http://' + authority)
-            valid_host = (parsed.hostname in ALLOWED_HOSTS and parsed.port == port
+            try:
+                host_is_local = parsed.hostname == 'localhost' or ipaddress.ip_address(parsed.hostname).is_loopback
+            except ValueError:
+                host_is_local = False
+            valid_host = (host_is_local and parsed.port == self.server.server_port
                           and not parsed.username and not parsed.password and not parsed.path
                           and not parsed.query and not parsed.fragment)
-        except ValueError:
-            valid_host = False
-        if not ipaddress.ip_address(self.client_address[0]).is_loopback or not valid_host:
+            client_is_local = ipaddress.ip_address(self.client_address[0]).is_loopback
+        except (ValueError, TypeError):
+            valid_host = client_is_local = False
+        if not client_is_local or not valid_host:
             self.json_reply({'error': '访问地址不被允许。'}, 403)
             return False
         origin = self.headers.get('Origin')
@@ -222,8 +227,8 @@ class Handler(BaseHTTPRequestHandler):
         elif path in ('/image-advisor.js', '/image-advisor.css'):
             mime = 'application/javascript; charset=utf-8' if path.endswith('.js') else 'text/css; charset=utf-8'
             self.reply((ROOT / path[1:]).read_bytes(), mime)
-        elif path == '/batch-workbench.js':
-            self.reply((ROOT / 'batch-workbench.js').read_bytes(), 'application/javascript; charset=utf-8')
+        elif path in ('/batch-workbench.js', '/prompt-help.js', '/gift-catalog.js'):
+            self.reply((ROOT / path[1:]).read_bytes(), 'application/javascript; charset=utf-8')
         elif path == '/gift-layout.js':
             self.reply((ROOT / 'gift-layout.js').read_bytes(), 'application/javascript; charset=utf-8')
         elif path == '/sku-layout.js':
@@ -236,13 +241,48 @@ class Handler(BaseHTTPRequestHandler):
                 self.reply(target.read_bytes(), 'image/png')
             else:
                 self.json_reply({'error': '找不到标识图片。'}, 404)
+        elif re.fullmatch(r'/gift-catalog/[a-f0-9]{16}\.(?:png|webp)', path):
+            import gift_catalog
+            asset_id, extension = path.rsplit('/', 1)[-1].split('.')
+            target = gift_catalog.file_for(asset_id)
+            if target and target.is_file() and target.suffix.lower() == '.' + extension:
+                self.reply(target.read_bytes(), 'image/webp' if extension == 'webp' else 'image/png')
+            else:
+                self.json_reply({'error': '赠品素材不存在。'}, 404)
+        elif re.fullmatch(r'/gift-catalog/[a-f0-9]{16}/(?:preview|detail)\.png', path):
+            import gift_catalog
+            asset_id = path.split('/')[2]
+            preview = gift_catalog.preview_for(asset_id, path.endswith('/detail.png'))
+            if preview:
+                self.reply(preview, 'image/png')
+            else:
+                self.json_reply({'error': '赠品预览不存在。'}, 404)
+        elif path == '/api/gift/examples':
+            import gift_catalog
+            params = urllib.parse.parse_qs(urllib.parse.urlsplit(self.path).query)
+            query = str(params.get('query', [''])[0])[:100]
+            try:
+                offset = max(0, min(1000, int(params.get('offset', ['0'])[0])))
+            except ValueError:
+                offset = 0
+            self.json_reply(gift_catalog.examples(query, offset))
+        elif path == '/api/gift/assets':
+            import gift_catalog
+            params = urllib.parse.parse_qs(urllib.parse.urlsplit(self.path).query)
+            query = str(params.get('query', [''])[0])[:100]
+            try:
+                offset = max(0, min(1000, int(params.get('offset', ['0'])[0])))
+            except ValueError:
+                offset = 0
+            self.json_reply(gift_catalog.assets(query, offset))
         elif path == '/api/health':
             configured = image_api.configured()
+            prompt_help_configured = bool(os.environ.get('ADVISOR_API_BASE') and os.environ.get('ADVISOR_MODEL') and os.environ.get('ADVISOR_API_KEY'))
             with LOCK:
                 pending = sum(job['status'] in ('queued', 'running') for job in JOBS.values())
             self.json_reply({'app': 'chun-image-workbench', 'version': VERSION, 'provider': 'configurable', 'pendingJobs': pending, 'idempotentJobs': True,
                              'lanEnabled': False, 'lanUrls': [],
-                             'localBackgroundRemoval': True, 'seriesLayout': True, 'configured': configured, 'token': TOKEN, 'maxImages': 3,
+                             'localBackgroundRemoval': True, 'seriesLayout': True, 'seriesLayoutRevision': 5, 'seriesPreserveVersion': 1, 'seriesBackgroundRevision': 2, 'configured': configured, 'promptHelpConfigured': prompt_help_configured, 'token': TOKEN, 'maxImages': 3,
                              'maxImageBytes': MAX_IMAGE, 'sizes': SIZES})
         elif re.fullmatch(r'/api/series/jobs/[a-f0-9]{32}', path):
             import series_layout
@@ -265,7 +305,7 @@ class Handler(BaseHTTPRequestHandler):
     def do_POST(self):
         if not self.allowed():
             return
-        if self.path not in ('/api/jobs', '/api/remove-background', '/api/advisor', '/api/series/analyze', '/api/series/prepare', '/api/series/product-facts'):
+        if self.path not in ('/api/jobs', '/api/remove-background', '/api/advisor', '/api/prompt-help', '/api/gift/search', '/api/gift/decompose', '/api/series/analyze', '/api/series/prepare', '/api/series/preserve', '/api/series/product-facts'):
             self.json_reply({'error': '接口不存在。'}, 404)
             return
         if not secrets.compare_digest(self.headers.get('X-Workbench-Token', ''), TOKEN):
@@ -280,11 +320,36 @@ class Handler(BaseHTTPRequestHandler):
                 self.json_reply({'error': '参考图片总大小超过限制。'}, 413)
                 return
             incoming = json.loads(self.rfile.read(length))
+            if self.path == '/api/gift/search':
+                import gift_catalog
+                try:
+                    self.json_reply(gift_catalog.search(incoming))
+                except RuntimeError as exc:
+                    self.json_reply({'error': str(exc)}, 503)
+                return
+            if self.path == '/api/gift/decompose':
+                import gift_example_editor
+                asset_id = incoming.get('id') if isinstance(incoming, dict) else None
+                if not isinstance(asset_id, str) or not re.fullmatch(r'[a-f0-9]{16}', asset_id):
+                    raise ValueError('赠品版式编号无效。')
+                try:
+                    self.json_reply(gift_example_editor.decompose(asset_id))
+                except RuntimeError as exc:
+                    self.json_reply({'error': str(exc)}, 503)
+                return
+            if self.path == '/api/prompt-help':
+                import prompt_helper
+                try:
+                    self.json_reply(prompt_helper.draft(incoming))
+                except RuntimeError as exc:
+                    self.json_reply({'error': str(exc)}, 503)
+                return
             if self.path.startswith('/api/series/'):
                 import series_layout
                 try:
                     method = {'/api/series/analyze': series_layout.analyze,
                               '/api/series/prepare': series_layout.prepare,
+                              '/api/series/preserve': series_layout.preserve,
                               '/api/series/product-facts': series_layout.product_facts}[self.path]
                     result = method(incoming)
                     self.json_reply(result, 202 if result.get('status') in ('queued', 'running') else 200)

@@ -19,9 +19,18 @@
     {id:'order',label:'下单就送',design:'平直通栏标题带'},
     {id:'threshold',label:'满件条件',design:'完整卡片与虚线分隔'},
     {id:'same',label:'买N送同款',design:'双礼盒与通栏缎带'},
-    {id:'loyal',label:'老客福利',design:'通栏标题与爱心装饰'}
+    {id:'loyal',label:'老客福利',design:'通栏标题与爱心装饰'},
+    // Frequent headings extracted from the supplied historical gift layouts.
+    {id:'instant',label:'买即赠',design:'醒目赠礼标题'},
+    {id:'instant_send',label:'买即送',design:'醒目赠礼标题'},
+    {id:'specified',label:'购买指定款式送',design:'购买条件标题'},
+    {id:'fullsize',label:'买正装赠',design:'正装赠礼标题'},
+    {id:'extra',label:'加码福利',design:'活动加赠标题'},
+    {id:'limited',label:'限时满赠',design:'限时满赠标题'},
+    {id:'one_to_one',label:'1:1送',design:'同款配赠标题'},
+    {id:'review',label:'好评带图单独加赠',design:'好评加赠标题'}
   ]);
-  function offerKind(text){const t=String(text||'');return /^品牌加赠/.test(t)?'brand':/^(?:下单就送|下单赠)/.test(t)?'order':/^满件条件/.test(t)?'threshold':/^买(?:N|\d+)送同款/.test(t)?'same':/^老客福利/.test(t)?'loyal':'gift';}
+  function offerKind(text){const t=String(text||'');return OFFERS.find(offer=>offer.id!=='gift'&&t.startsWith(offer.label))?.id||(/^买(?:N|\d+)送同款/.test(t)?'same':'gift');}
   function offerHeading(id,n=''){
     const offer=OFFERS.find(o=>o.id===id)||OFFERS[0];
     if(offer.id!=='same')return offer.label;
@@ -29,7 +38,7 @@
     if(!Number.isInteger(Number(n))||Number(n)<1||Number(n)>99)throw Error('购买件数 N 请输入 1–99 的整数。');
     return '买'+Number(n)+'送同款';
   }
-  function offerDescription(text){return String(text||'').trim().replace(/^(?:(?:买就送|品牌加赠|下单就送|下单赠礼?|满件条件|买(?:N|\d+)送同款|老客福利|赠品|赠送)[：:\s]*)+/,'');}
+  function offerDescription(text){return String(text||'').trim().replace(/^(?:(?:买就送|品牌加赠|下单就送|下单赠礼?|满件条件|买(?:N|\d+)送同款|老客福利|买即赠|买即送|购买指定款式送|买正装赠|加码福利|限时满赠|1:1送|好评带图单独加赠|赠品|赠送)[：:\s]*)+/,'');}
   const getStyle=id=>STYLES.find(s=>s.id===id)||STYLES[2];
   function stylePrompt(id,offer='gift',n=''){return '标题：'+offerHeading(offer,n)+'；版式：'+(OFFERS.find(o=>o.id===offer)||OFFERS[0]).design+'；'+getStyle(id).note+'；顶部赠礼标题、下方居中商品说明与大幅商品主体。背景干净平整，不使用模糊纹理或噪点，保留包装真实颜色。';}
   function lightColor(color){const hex=String(color).replace('#','');if(!/^[a-f0-9]{6}$/i.test(hex))return false;const rgb=[0,2,4].map(i=>parseInt(hex.slice(i,i+2),16));return rgb[0]*.299+rgb[1]*.587+rgb[2]*.114>190;}
@@ -216,6 +225,11 @@
   function preserveLayout(layers,previous){
     const occurrences=new Map();
     for(const layer of layers){
+      if(layer.role==='gift-card'){
+        const old=previous.find(item=>item.role==='gift-card');
+        if(old)layer.id=old.id;
+        continue;
+      }
       if(!['gift-image','gift-title','gift-description'].includes(layer.role))continue;
       const keys=['x','y','w','h','rotation',...(layer.type==='text'?['fontSize']:[])];
       if(!layer.giftLayoutBase)layer.giftLayoutBase=Object.fromEntries(keys.map(key=>[key,layer[key]]));
@@ -245,7 +259,21 @@
     }catch(error){editor.state=before;editor.batchDirty=false;editor.batchNotify=true;throw error;}
     finally{editor.endBatch();}
   }
+  async function buildPreview(context){
+    const {document:project,region}=context;validateRegion(region,project.width,project.height);
+    const assets=(context.giftAssets||[]).flatMap(asset=>Array.from({length:quantity(asset.quantity)},(_,i)=>({...asset,copyNumber:i+1})));
+    const groupId='gift_'+ChunRuntime.randomUUID(),common={locked:false,visible:true,rotation:0,opacity:1,groupId};
+    const canvas=document.createElement('canvas');canvas.width=Math.ceil(region.w);canvas.height=Math.ceil(region.h);
+    const ctx=canvas.getContext('2d');ctx.strokeStyle='#A8B8B0';ctx.lineWidth=Math.max(1,region.w/314);ctx.strokeRect(ctx.lineWidth/2,ctx.lineWidth/2,canvas.width-ctx.lineWidth,canvas.height-ctx.lineWidth);
+    const frame={...common,...region,type:'image',src:canvas.toDataURL('image/png'),role:'gift-card',giftAIPreview:true,name:'赠品整体 · 图片框'};
+    const images=await Promise.all(assets.map(asset=>image(asset.src))),cols=Math.max(1,Math.ceil(Math.sqrt(assets.length*.85))),rows=Math.ceil(assets.length/cols)||1;
+    const area={x:region.x+region.w*.08,y:region.y+region.h*.08,w:region.w*.84,h:region.h*.84},gap=Math.min(region.w,region.h)*.025;
+    const layers=[frame,...assets.map((asset,i)=>{const row=Math.floor(i/cols),count=Math.min(cols,assets.length-row*cols),cell={x:area.x+(i%cols+(cols-count)/2)*area.w/cols+gap,y:area.y+row*area.h/rows+gap,w:area.w/cols-2*gap,h:area.h/rows-2*gap};return{...common,...contain(images[i].naturalWidth,images[i].naturalHeight,cell),type:'image',src:asset.src,giftAssetId:asset.id,giftCopyNumber:asset.copyNumber,role:'gift-image',name:'赠品 · '+(asset.name||'商品图片')};})];
+    if(project.layers.some(layer=>layer.role==='gift-card'&&layer.giftAIPreview))preserveLayout(layers,project.layers);
+    return {layers};
+  }
   async function build(context,texture) {
+    if(context.previewOnly)return buildPreview(context);
     const {document:project,region,title,description,giftSrc,cardColor,textColor}=context;
     const style=getStyle(context.style||project.meta?.forms?.giftStyle),offer=context.offer||project.meta?.forms?.giftOffer||offerKind(title),offerCount=context.offerCount??project.meta?.forms?.giftOfferCount??'';
     validateRegion(region,project.width,project.height);
@@ -266,8 +294,8 @@
       if(editor.textOverflows(layer))throw Error('赠品文字过长，固定区域无法完整显示，请适当缩短。');
       return layer;
     };
-    const heading=offerHeading(offer,offerCount);
-    const detail=description?.trim()||offerDescription(title);
+    const heading=offer==='custom'&&context.heading?.trim()?context.heading.trim():offerHeading(offer,offerCount);
+    const detail=context.hideDescription?'':description?.trim()||offerDescription(title);
     const scale=Math.min(region.w/314,region.h/388);
     const titleSlot={x:region.x+region.w*.08,y:region.y+region.h*.106,w:region.w*.84,h:region.h*.14,fontSize:(offer==='same'?34:38)*scale};
     const detailSlot={x:titleSlot.x,y:region.y+region.h*.267,w:titleSlot.w,h:region.h*.135,fontSize:24*scale};
@@ -276,8 +304,8 @@
     const layers=[
       {...common,locked:true,type:'image',src:await cardImage(region,cardColor||style.color,texture,style.id,offer),giftTexture:texture||null,giftStyle:style.id,giftOffer:offer,giftOfferCount:String(offerCount),giftDesignVersion:8,...layout.card,name:'赠品 · '+style.name,role:'gift-card'},
       ...imageLayers,
-      textLayer(heading,titleSlot,'#FFFFFF','gift-title','赠品 · 标题'),
-      ...(detail?[textLayer(detail,detailSlot,detailColor,'gift-description','赠品 · 描述文字')]:[])
+      textLayer(heading,titleSlot,context.headingColor||'#FFFFFF','gift-title','赠品 · 标题'),
+      ...(detail?[{...textLayer(detail,detailSlot,detailColor,'gift-description','赠品 · 描述文字'),giftAccentWords:context.accentWords||'',giftAccentColor:context.accentColor||'#D12432'}]:[])
     ];
     preserveLayout(layers,project.layers);
     await apply(editor,layers);

@@ -5,3 +5,8 @@ results/
 image-jobs/
 series-layout/
 logo-library/brand-svg/
+gift-assets/
+gift-examples/
+gift-example-text.json
+models/sam_hq_vit_b_encoder.onnx
+models/sam_hq_vit_b_decoder.onnx

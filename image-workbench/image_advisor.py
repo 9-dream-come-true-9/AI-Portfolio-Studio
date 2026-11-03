@@ -6,13 +6,13 @@ import urllib.error
 import urllib.parse
 import urllib.request
 
-KNOWLEDGE = (Path(__file__).resolve().parent / 'advisor-knowledge.md').read_text(encoding='utf-8')
+KNOWLEDGE_PATH = Path(__file__).resolve().parent / 'advisor-knowledge.md'
 
 class NoRedirect(urllib.request.HTTPRedirectHandler):
     def redirect_request(self, req, fp, code, msg, headers, newurl):
         return None
 
-def answer(data):
+def settings():
     base = os.environ.get('ADVISOR_API_BASE', '').rstrip('/')
     model = os.environ.get('ADVISOR_MODEL', '')
     key = os.environ.get('ADVISOR_API_KEY', '')
@@ -21,6 +21,11 @@ def answer(data):
     url = urllib.parse.urlsplit(base)
     if url.scheme != 'https' or not url.hostname or url.username or url.password or url.query or url.fragment:
         raise RuntimeError('文字模型地址配置无效')
+    return base, model, key
+
+
+def answer(data):
+    base, model, key = settings()
     messages = data.get('messages') if isinstance(data, dict) else None
     if not isinstance(messages, list) or not 1 <= len(messages) <= 12:
         raise ValueError('对话格式不正确')
@@ -31,7 +36,7 @@ def answer(data):
         clean.append({'role': item['role'], 'content': item['content']})
     if clean[-1]['role'] != 'user':
         raise ValueError('请先输入问题')
-    payload = json.dumps({'model': model, 'messages': [{'role': 'system', 'content': KNOWLEDGE}] + clean, 'stream': False, 'max_completion_tokens': 2048, 'thinking': {'type': 'disabled'}}, ensure_ascii=False).encode('utf-8')
+    payload = json.dumps({'model': model, 'messages': [{'role': 'system', 'content': KNOWLEDGE_PATH.read_text(encoding='utf-8')}] + clean, 'stream': False, 'max_completion_tokens': 2048, 'thinking': {'type': 'disabled'}}, ensure_ascii=False).encode('utf-8')
     request = urllib.request.Request(base + '/chat/completions', data=payload, headers={'Content-Type':'application/json', 'Authorization':'Bearer '+key}, method='POST')
     try:
         with urllib.request.build_opener(NoRedirect()).open(request, timeout=45) as response:

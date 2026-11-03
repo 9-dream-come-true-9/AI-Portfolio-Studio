@@ -24,6 +24,23 @@ async function switchModuleWorkspace(module){
     localStorage.setItem('chun-active-module',module);await loadModuleBatch(module,currentBatchId);renderSources();
   }finally{historyRestoring=false;setWorkspaceLocked(false);renderEditHistory();renderSources();}
 }
+async function continueLogoWithGift(){
+  if(activeModule!=='logo'||!canSwitchWorkspace())return;
+  if(!editor.state.layers.some(layer=>layer.visible!==false))throw Error('请先在画布中添加图片并完成 LOGO 编辑。');
+  const button=$('logoContinueGift');button.disabled=true;historyRestoring=true;setWorkspaceLocked(true);
+  try{
+    finishInlineText();await saveBeforeSwitch();
+    const source=getDocument(),src=await resultAsDataURL(await editor.exportBlob('png'));
+    const id=ChunRuntime.randomUUID(),name=(source.meta.name||source.meta.sourceName||'LOGO作品')+' · 添加赠品';
+    const base=editor._layer({type:'image',src,x:0,y:0,w:source.width,h:source.height,role:'product',name:'主图 · 已完成 LOGO',visible:true,locked:false});
+    const doc={width:source.width,height:source.height,background:{type:'solid',color:'#ffffff'},layers:[base],selectedId:null,meta:{workId:id,batchId:id,module:'gift',createdExplicitly:true,sourceKind:'source',sourceName:name,name,imageKey:await imageContentKey(src),sourceOrder:Date.now(),giftMode:'manual',forms:{...newWorkDefaults,giftLayoutMode:'template'},creationModes:{...creationModes,gift:'manual'}}};
+    await loadDocument(doc,{save:false});
+    if(!await saveDraft())throw Error(lastSaveError||'赠品主图保存失败，请重试。');
+    localStorage.setItem('chun-active-module','gift');renderSources();requestAnimationFrame(fitCanvas);
+    toast('已将当前 LOGO 画布作为主图，可以继续添加赠品。');
+  }finally{historyRestoring=false;setWorkspaceLocked(false);button.disabled=false;renderEditHistory();renderSources();}
+}
+on('logoContinueGift','click',continueLogoWithGift);
 async function initializeModuleWorkspaces(){
   const until=Date.now()+10000;while(!window.appReady&&!window.workbenchStorageReady&&Date.now()<until)await new Promise(resolve=>setTimeout(resolve,25));
   if(!db)return;let module=activeModule,remembered=null;
@@ -61,9 +78,15 @@ async function moveWorkspaceImage(offset){
 function referenceBatchId(){return currentReferenceBatchId||currentBatchId;}
 function sourceImages(){if(activeModule==='gift')return [];return editRecords.filter(r=>r.batchId===referenceBatchId()&&r.sourceKind!=='generated'&&r.hasSource!==false&&recordBelongsToModule(r,activeModule)).sort((a,b)=>(a.sourceOrder||new Date(a.createdAt).getTime())-(b.sourceOrder||new Date(b.createdAt).getTime()));}
 function generationScope(module=activeModule,batch=referenceBatchId()){return module+':'+batch;}
+function generationSettingsScope(module=activeModule,batch=referenceBatchId()){return generationScope(module,batch)+(module==='gift'?':'+giftMode:'');}
 function generationSettings(){
-  const key=generationScope(),sources=sourceImages();let settings=generationSettingsCache[key];
+  const key=generationSettingsScope(),sources=sourceImages();let settings=generationSettingsCache[key];
   if(!settings)settings=generationSettingsCache[key]={mode:'auto',enabled:sources.length>1,count:Math.max(1,sources.length),drafts:[]};
+  if(activeModule==='gift'){
+    settings.mode='manual';settings.count=1;settings.enabled=false;
+    if(!settings.drafts[0])settings.drafts[0]={prompt:$('aiRequest').value,referenceId:'none'};
+    return settings;
+  }
   if(settings.mode==='auto'){const wasBatch=settings.enabled;settings.count=Math.max(1,sources.length);if(!wasBatch&&settings.count>1&&settings.drafts[0])settings.drafts[0].prompt=$('aiRequest').value;else if(wasBatch&&settings.count===1&&settings.drafts[0])$('aiRequest').value=settings.drafts[0].prompt;}
   if(settings.mode!=='auto'&&settings.drafts[0]){if(settings.enabled&&settings.count===1)$('aiRequest').value=settings.drafts[0].prompt;else if(!settings.enabled&&settings.count>1)settings.drafts[0].prompt=$('aiRequest').value;}
   settings.enabled=settings.count>1;
@@ -75,9 +98,9 @@ function generationSettings(){
   }
   return settings;
 }
-async function persistGenerationSettings(){const key=generationScope(),value=copyBatchValue(generationSettings());generationSettingsLoaded.add(key);await historyDB('readwrite',store=>store.put(value,'generation-settings:'+key));}
+async function persistGenerationSettings(){const key=generationSettingsScope(),value=copyBatchValue(generationSettings());generationSettingsLoaded.add(key);await historyDB('readwrite',store=>store.put(value,'generation-settings:'+key));}
 async function loadGenerationSettings(module,batch){
-  if(!batch)return;const key=generationScope(module,batch);if(generationSettingsLoaded.has(key))return;
+  if(!batch)return;const key=generationSettingsScope(module,batch);if(generationSettingsLoaded.has(key))return;
   const saved=await historyDB('readonly',(store,done)=>{const r=store.get('generation-settings:'+key);r.onsuccess=()=>done(r.result);});
   if(!generationSettingsLoaded.has(key)){if(saved&&Array.isArray(saved.drafts))generationSettingsCache[key]=saved;generationSettingsLoaded.add(key);$('generationRequests').dataset.renderKey='';}
 }
@@ -124,7 +147,7 @@ function renderBackgroundTasks(){
   if(!$('backgroundTasksDialog').open)return;const list=$('backgroundTasksList');list.replaceChildren();
   if(!plans.length){const p=document.createElement('p');p.className='note';p.textContent='暂无生成任务';list.append(p);}
   for(const plan of [...plans].reverse()){
-    const row=document.createElement('div');row.className='background-task';const s=imageBatchSummary(plan),text=document.createElement('div');const title=document.createElement('strong');title.textContent=modules[plan.module][0]+' · '+s.total+'张';const detail=document.createElement('p');detail.textContent=(plan.status==='paused'?'已暂停':plan.status==='queued'?'排队中':plan.status==='running'?'生成中':'已完成')+' · 成功 '+s.completed+' / '+s.total+(s.failed?'，失败 '+s.failed:'');text.append(title,detail);row.append(text);
+    const row=document.createElement('div');row.className='background-task';const s=imageBatchSummary(plan),text=document.createElement('div');const title=document.createElement('strong');title.textContent=modules[plan.module][0]+' · '+s.total+'张';const detail=document.createElement('p');detail.textContent=(plan.status==='paused'?'已暂停':plan.status==='queued'?'排队中':plan.status==='running'?'生成中':'已完成')+' · 成功 '+s.completed+' / '+s.total+(s.failed?'，失败 '+s.failed:'');text.append(title,detail);for(const item of plan.items.filter(i=>i.status==='failed'&&i.error)){const error=document.createElement('p');error.textContent=item.name+'：'+item.error;text.append(error);}row.append(text);
     if(s.completed){const view=document.createElement('button');view.className='btn';view.textContent='查看结果';view.onclick=safe(()=>{$('backgroundTasksDialog').close();showImageBatchResults(plan);});row.append(view);}
     if(plan.status==='paused'){const resume=document.createElement('button');resume.className='btn';resume.textContent='继续任务🎯';resume.onclick=safe(()=>runImageBatch(plan));row.append(resume);}list.append(row);
   }
@@ -143,12 +166,13 @@ function batchImagePayload(item,module){
   const layer=item.document.layers.find(layer=>['product','series-product'].includes(layer.role))||item.document.layers.find(layer=>layer.type==='image');
   return layer?[layer.src]:[];
 }
-function batchOutputSize(doc,module){if(module==='gift')return '1024*1024';if(module==='sku')return doc.width>1536?'2048*2048':'1024*1024';const ratio=doc.width/doc.height;return ratio<.85?'1024*1536':ratio>1.18?'1536*1024':Math.max(doc.width,doc.height)>1536?'2048*2048':'1024*1024';}
+function batchOutputSize(doc,module){if(module==='gift')return doc.width/doc.height<.85?'1024*1536':doc.width/doc.height>1.18?'1536*1024':'1024*1024';if(module==='sku')return doc.width>1536?'2048*2048':'1024*1024';const ratio=doc.width/doc.height;return ratio<.85?'1024*1536':ratio>1.18?'1536*1024':Math.max(doc.width,doc.height)>1536?'2048*2048':'1024*1024';}
 async function createImageBatch(){
   if(activeModule==='gift')await giftUploadTask;
   await saveBeforeSwitch();
-  const module=activeModule,scopeBatch=referenceBatchId(),settings=copyBatchValue(generationSettings()),template=copyBatchValue(getDocument()),sources=sourceImages().map(copyBatchValue),giftSource=giftSrc;
-  const drafts=settings.enabled?settings.drafts.slice(0,settings.count):[{prompt:$('aiRequest').value,referenceId:sources.find(s=>s.id===currentWorkId)?.id||sources[0]?.id||'none'}];
+  const module=activeModule,scopeBatch=referenceBatchId(),settings=copyBatchValue(generationSettings()),template=copyBatchValue(getDocument()),sources=sourceImages().map(copyBatchValue),giftSource=giftSrc,isGiftAI=module==='gift'&&giftMode==='ai';
+  const selectedDrafts=settings.enabled?settings.drafts.slice(0,settings.count):[{prompt:$('aiRequest').value,referenceId:sources.find(s=>s.id===currentWorkId)?.id||sources[0]?.id||'none'}];
+  const drafts=isGiftAI?selectedDrafts.map(draft=>({...draft,referenceId:'none'})):selectedDrafts;
   for(let i=0;i<drafts.length;i++)if(!drafts[i].prompt.trim())throw Error('请填写'+(settings.enabled?'第'+(i+1)+'张':'')+'生成要求。');
   const items=[],docs=new Map();
   for(const ref of new Set(drafts.map(d=>d.referenceId).filter(id=>id!=='none'))){
@@ -156,9 +180,11 @@ async function createImageBatch(){
     const doc=await historyDB('readonly',(store,done)=>{const r=store.get('edit-record:'+ref);r.onsuccess=()=>done(r.result);});if(!doc||doc.meta?.module!==module)throw Error('参考图片记录不可用，请重新导入。');docs.set(ref,doc);
   }
   const preparedGiftAssets=module==='gift'?await prepareGiftAssets(giftAssets):[],preparedGift=preparedGiftAssets[0]?.src||null;
+  if(module==='gift'&&!preparedGiftAssets.length)throw Error('请先从赠品商品图中选择，或上传自己的商品图片。');
   const giftReferences=preparedGiftAssets.length?await GiftLayout.referenceImages(preparedGiftAssets):[];
   for(let i=0;i<drafts.length;i++){
     const draft=drafts[i],source=docs.get(draft.referenceId),doc=copyBatchValue(source||{...template,layers:[]});doc.meta={...template.meta,...doc.meta,forms:{...template.meta.forms,aiRequest:draft.prompt.trim()},giftSrc:giftSource};if(module==='sku')doc.height=doc.width;
+    if(isGiftAI){doc.layers=[];doc.selectedId=null;doc.background={type:'solid',color:'#ffffff'};doc.meta={...doc.meta,giftMode:'ai',giftWorkspaces:{},giftLayout:null,giftAssets:copyBatchValue(preparedGiftAssets),giftSrc:preparedGift,forms:{...doc.meta.forms}};for(const key of Object.keys(doc.meta.forms))if(key.startsWith('gift'))delete doc.meta.forms[key];}
     const item={workId:source?.meta.workId||null,outputWorkId:ChunRuntime.randomUUID(),name:'第'+(i+1)+'张'+(source?' · '+(source.meta.sourceName||'参考图'):''),request:draft.prompt.trim(),referenceId:draft.referenceId,referenceName:sources.find(s=>s.id===draft.referenceId)?.fileName||'无参考图',document:doc,status:'pending',requestId:ChunRuntime.randomUUID().replaceAll('-',''),size:batchOutputSize(doc,module)};
     const layer=source?.layers.find(l=>['product','series-product'].includes(l.role))||source?.layers.find(l=>l.type==='image');item.references=module==='gift'?giftReferences:layer?[layer.src]:[];
     if(item.references.some(src=>imageBytes(src)>10*1024*1024))throw Error(item.referenceName+'超过参考图 10 MB 限制，请先压缩。');
@@ -167,7 +193,10 @@ async function createImageBatch(){
     item.negativePrompt=String(savedPrompt?.negativePrompt||'').trim();
     item.prompt=withNegativePrompt(positivePrompt,item.negativePrompt);
     if(item.prompt.length>16000)throw Error('第'+(i+1)+'张提示词和反面提示词总长度不能超过 16000 字。');
-    if(module==='gift'){
+    if(isGiftAI){
+      item.referenceRole='gift-products-only';
+      item.giftContext={version:1,outputMode:'complete-poster',workId:item.outputWorkId,document:doc,giftAssets:copyBatchValue(preparedGiftAssets),giftSrc:preparedGift,assetMode:'uploaded',request:item.request,references:[...giftReferences]};
+    }else if(module==='gift'){
       const context={version:1,workId:item.outputWorkId,document:doc,region:GiftLayout.defaultRegion(doc.width,doc.height),style:template.meta.forms.giftStyle,offer:template.meta.forms.giftOffer,offerCount:template.meta.forms.giftOfferCount,giftAssets:GiftLayout.resolveAssets(preparedGiftAssets,template.meta.forms.giftTitleText.trim(),item.request),request:item.request,giftSrc:preparedGift,assetMode:preparedGift?'uploaded':'generated',title:template.meta.forms.giftTitleText.trim()||GiftLayout.offerHeading(template.meta.forms.giftOffer,template.meta.forms.giftOfferCount),description:'',cardColor:template.meta.forms.giftCardColor,textColor:template.meta.forms.giftTextColor};
       if(!context.title)throw Error('请填写赠品文字。');if(!preparedGift)GiftLayout.generatedQuantity(context.title,item.request);await GiftLayout.build(context,null);item.giftContext=context;
     }
@@ -178,10 +207,19 @@ async function createImageBatch(){
 }
 function buildGenerationPrompt(module,request,doc,hasReference,giftSource){
   if(module==='sku')return SkuLayout.fullImagePrompt(request,hasReference,doc.meta?.forms||{});
-  if(module==='gift')return giftSource?['生成一张仅包含材质底纹的设计素材，用于赠品卡片背景。','使用平整清晰的底色和极浅的色彩层次，保持充分留白；不使用模糊纹理、颗粒或噪点。' ,'样式方向：'+GiftLayout.stylePrompt(doc.meta?.forms?.giftStyle,doc.meta?.forms?.giftOffer,doc.meta?.forms?.giftOfferCount),'参考附件为已去背景的赠品素材，可参考其包装颜色协调底色。','底纹风格参考：'+request,'输出一张完整底纹图片。'].join('\n'):['生成一件赠品商品的独立产品素材。','用户要求：'+request,'单件完整赠品主体，不画卡片、标题或独立文字，保留安全边距。','背景必须是完全均匀的纯荧光绿色 RGB(0,255,0)，软件会去除背景并固定位置。输出一张 PNG。'].join('\n');
+  if(module==='gift')return[
+    '生成一张完整、可直接使用的美妆护肤品电商赠品促销海报。',
+    `画布比例：${doc.width}:${doc.height}，${doc.width<doc.height?'竖版':doc.width>doc.height?'横版':'方形'}构图。`,
+    '本次设计要求：\n'+request,
+    giftSource?'附件仅为本次选择或上传的独立商品参考图。以附件为商品包装、形状、品牌和已知规格的依据，将商品融入本次海报。':'根据本次设计要求呈现商品。',
+    '完整呈现用户要求的版式、背景、商品场景、装饰与文字；明确指定的中文文案须准确清晰。',
+    '标题、活动文字、赠品数量、配色与位置以本次要求为准，未指定的文案与数量不额外补充。',
+    '输出一张完整成品海报，产品摄影质感，清晰自然。'
+  ].join('\n');
   return ['任务：'+modules[module][0],`画布：${doc.width} × ${doc.height} 像素`,'本张生成要求：\n'+request,hasReference?'以本张指定的参考图片为依据，保留真实商品的包装、瓶型、品牌和已知规格。':'本张没有参考图片，根据描述设计画面。',module==='logo'?'按要求添加 LOGO，位置与大小以本张描述为准。':module==='background'?'按本张要求设计背景与光影，保留参考商品的真实外观。':'完成本张描述的画面改动。','商品信息使用已提供资料，不编造成分、功效、规格或数量。'].join('\n');
 }
 async function submitBatchItem(plan,item){
+  if(plan.module==='gift'&&item.giftContext?.outputMode==='complete-poster'){const approved=item.giftContext.references;if(!Array.isArray(approved)||!approved.length||!Array.isArray(item.references)||approved.length!==item.references.length||approved.some((src,i)=>src!==item.references[i]))throw Error('赠品 AI 参考图已变化，请重新选择商品图后生成。');}
   item.status='submitting';await saveImageBatch(plan);
   const response=await fetch(aiAPI+'/api/jobs',{method:'POST',headers:{'Content-Type':'application/json','X-Workbench-Token':aiSessionToken},body:JSON.stringify({request_id:item.requestId,prompt:item.prompt,size:item.size,images:batchImagePayload(item,plan.module)}),signal:AbortSignal.timeout(30000)});
   const job=await response.json();
@@ -275,25 +313,32 @@ function syncBatchResultControls(){
   const multiple=active&&batchSuccessfulItems(imageBatchPreview).length>1;$('batchResultNavigation').classList.toggle('hidden',!multiple);$('downloadBatchResults').classList.toggle('hidden',!multiple);$('removeAIResult').classList.toggle('hidden',active);
    if(active){const items=batchSuccessfulItems(imageBatchPreview),s=imageBatchSummary(imageBatchPreview);$('batchResultPager').textContent=(imageBatchPreviewIndex+1)+' / '+items.length+' · '+items[imageBatchPreviewIndex].name;$('batchPreviewPrevious').disabled=imageBatchPreviewIndex===0;$('batchPreviewNext').disabled=imageBatchPreviewIndex>=items.length-1;}
 }
-async function batchOutputDocument(plan,item,index=0){
+async function batchOutputDocument(plan,item,index=0,destinationModule=plan.module){
   const canvas=document.createElement('canvas'),editing=new ImageEditor(canvas);await editing.loadProject(item.document);
   if(item.result.gift)await GiftLayout.apply(editing,item.result.gift.layers);
   else if(plan.module==='sku')await SkuLayout.apply(editing,{background:editing.state.background,layers:[{type:'image',src:item.result.src,x:0,y:0,w:editing.state.width,h:editing.state.width,role:'product',name:'AI SKU 成品',visible:true,opacity:1,rotation:0,locked:false}]});
   else{const d=await dimensions(item.result.src);await editing.addImage(item.result.src,{...contain(d.w,d.h,0,0,editing.state.width,editing.state.height),role:'ai-result',name:'AI · '+modules[plan.module][0]});}
   if(!plan.resultBatchId)plan.resultBatchId=ChunRuntime.randomUUID();if(!item.outputWorkId)item.outputWorkId=ChunRuntime.randomUUID();
   const giftMeta=item.result.gift?{giftAssets:item.result.gift.context.giftAssets,giftSrc:item.result.gift.context.giftSrc}:{};
-  return{...editing.getProject(),meta:{...item.document.meta,...giftMeta,...(plan.kind==='series-edit'?{name:item.name}:{}),workId:item.outputWorkId,module:plan.module,batchId:plan.resultBatchId,referenceBatchId:plan.sourceBatchId,imageKey:'generated-'+item.requestId,sourceOrder:new Date(plan.createdAt).getTime()+index,sourceKind:'generated',sourceName:item.name,batchAI:{planId:plan.id,jobId:item.jobId,sourceWorkId:item.workId,request:item.request}}};
+  return{...editing.getProject(),meta:{...item.document.meta,...giftMeta,...(plan.module==='sku'?{seriesLayout:null}:{}),...(plan.kind==='series-edit'?{name:item.name}:{}),workId:item.outputWorkId,module:destinationModule,batchId:plan.resultBatchId,referenceBatchId:plan.sourceBatchId,imageKey:'generated-'+item.requestId,sourceOrder:new Date(plan.createdAt).getTime()+index,sourceKind:'generated',sourceName:item.name,batchAI:{planId:plan.id,jobId:item.jobId,sourceWorkId:item.workId,generatedModule:plan.module,request:item.request}}};
 }
-async function insertImageBatchResults(plan,selectedItems=batchSuccessfulItems(plan)){
+async function insertImageBatchResults(plan,selectedItems=batchSuccessfulItems(plan),destinationModule=plan.module){
   if(historyRestoring)return;historyRestoring=true;setWorkspaceLocked(true);
   try{
     finishInlineText();await saveBeforeSwitch();const successful=selectedItems;let first=null;
+    const targetModule=modules[destinationModule]?destinationModule:plan.module;
     for(let i=0;i<successful.length;i++){
-      const item=successful[i],current=item.outputWorkId?await historyDB('readonly',(store,done)=>{const r=store.get('edit-record:'+item.outputWorkId);r.onsuccess=()=>done(r.result);}):null;
-      if(current?.meta?.batchAI?.jobId===item.jobId){if(!first)first=current;continue;}
-      const doc=await batchOutputDocument(plan,item,plan.items.indexOf(item));if(!await saveEditRecord(doc))throw Error('结果保存失败：'+(lastSaveError||'浏览器存储不可用')+'；不会重新生图。');if(!first)first=doc;
+      const item=successful[i],knownId=item.appliedWorkIdsByModule?.[targetModule]||(targetModule===plan.module?item.outputWorkId:null);
+      const current=knownId?await historyDB('readonly',(store,done)=>{const r=store.get('edit-record:'+knownId);r.onsuccess=()=>done(r.result);}):null;
+      if(current?.meta?.batchAI?.jobId===item.jobId&&current.meta.module===targetModule){if(!first)first=current;continue;}
+      const outputWorkId=knownId&&!current?knownId:ChunRuntime.randomUUID();
+      const doc=await batchOutputDocument(plan,{...item,outputWorkId},plan.items.indexOf(item),targetModule);
+      if(!await saveEditRecord(doc))throw Error('结果保存失败：'+(lastSaveError||'浏览器存储不可用')+'；不会重新生图。');
+      item.appliedWorkIdsByModule={...item.appliedWorkIdsByModule,[targetModule]:outputWorkId};
+      if(targetModule===plan.module)item.outputWorkId=outputWorkId;
+      if(!first)first=doc;
     }
-    if(first){await loadDocument(first,{save:false});localStorage.setItem('chun-active-module',plan.module);await saveDraft();}plan.inserted=batchSuccessfulItems(plan).every(item=>!!item.outputWorkId);await saveImageBatch(plan);$('aiResultDialog').close();toast('已将当前生成结果应用到画布。');
+    if(first){await loadDocument(first,{save:false});localStorage.setItem('chun-active-module',targetModule);await saveDraft();}plan.inserted=batchSuccessfulItems(plan).every(item=>!!item.outputWorkId||!!Object.keys(item.appliedWorkIdsByModule||{}).length);await saveImageBatch(plan);$('aiResultDialog').close();toast('已将当前生成结果应用到画布。');
   }finally{historyRestoring=false;setWorkspaceLocked(false);renderEditHistory();renderSources();}
 }
 // Store rendered images in a ZIP without recompression.
@@ -322,16 +367,16 @@ on('applyAIResult','click',async()=>{
     if(plan){
       const item=batchSuccessfulItems(plan)[imageBatchPreviewIndex];
       if(!item)throw Error('当前生成结果已不可用，请重新打开AI生成记录。');
-      await insertImageBatchResults(plan,[item]);
+      await insertImageBatchResults(plan,[item],activeModule);
     }else{
       // Older single-image jobs can still be opened from saved generation records.
       plan=aiLastResult.applyPlanId?await readImageBatch(aiLastResult.applyPlanId):null;
       if(!plan){
         const result=aiLastResult,doc=result.gift?.context?.document||result.sku?.context?.document||getDocument(),id=ChunRuntime.randomUUID();
-        plan={id,module:result.module||activeModule,createdAt:new Date().toISOString(),sourceBatchId:doc.meta?.referenceBatchId||doc.meta?.batchId,items:[{requestId:ChunRuntime.randomUUID(),jobId:result.jobId||id,workId:doc.meta?.workId,name:doc.meta?.sourceName||'生成图片',status:'succeeded',document:doc,result}]};
+        plan={id,module:result.module||doc.meta?.module||activeModule,createdAt:new Date().toISOString(),sourceBatchId:doc.meta?.referenceBatchId||doc.meta?.batchId,items:[{requestId:ChunRuntime.randomUUID(),jobId:result.jobId||id,workId:doc.meta?.workId,name:doc.meta?.sourceName||'生成图片',status:'succeeded',document:doc,result}]};
         result.applyPlanId=id;await saveImageBatch(plan);
       }
-      await insertImageBatchResults(plan);
+      await insertImageBatchResults(plan,batchSuccessfulItems(plan),activeModule);
     }
   }finally{button.disabled=false;}
 });
@@ -344,7 +389,7 @@ function withNegativePrompt(prompt,negative){const value=String(negative||'').tr
 
 async function promptEditorEntries(){
   const module=activeModule,settings=copyBatchValue(generationSettings()),template=copyBatchValue(getDocument()),sources=sourceImages(),giftSource=giftSrc;
-  const drafts=settings.enabled?settings.drafts.slice(0,settings.count):[{prompt:$('aiRequest').value,referenceId:sources.find(s=>s.id===currentWorkId)?.id||sources[0]?.id||'none'}];
+  const selectedDrafts=settings.enabled?settings.drafts.slice(0,settings.count):[{prompt:$('aiRequest').value,referenceId:sources.find(s=>s.id===currentWorkId)?.id||sources[0]?.id||'none'}],drafts=module==='gift'&&giftMode==='ai'?selectedDrafts.map(draft=>({...draft,referenceId:'none'})):selectedDrafts;
   const entries=[];
   for(let i=0;i<drafts.length;i++){
     const draft=drafts[i],doc=draft.referenceId!=='none'?await historyDB('readonly',(store,done)=>{const r=store.get('edit-record:'+draft.referenceId);r.onsuccess=()=>done(r.result);}):null;
@@ -358,7 +403,9 @@ let promptEditorScope='',promptEditorBases=[];
 async function openPromptEditor(){
   const scope=generationScope(),entries=await promptEditorEntries();if(scope!==generationScope())throw Error('当前作品已切换，请重新打开提示词。');
   promptEditorScope=scope;promptEditorBases=entries.map(e=>e.base);const container=$('promptEditors');container.replaceChildren();
-  entries.forEach((entry,index)=>{const label=document.createElement('label');label.textContent='第'+(index+1)+'张生成提示词';const area=document.createElement('textarea');area.rows=8;area.value=entry.text;area.dataset.promptEditor=String(index);area.setAttribute('aria-label',label.textContent);label.append(area);container.append(label);});
+  $('promptDialog').querySelector('h2').textContent=activeModule==='gift'?'赠品 AI 生图提示词':'创作提示词';
+  $('resetPromptBtn').textContent=activeModule==='gift'?'恢复赠品预设':'恢复默认';
+  entries.forEach((entry,index)=>{const label=document.createElement('label');label.textContent='第'+(index+1)+'张'+(activeModule==='gift'?' · '+'赠品完整海报模板':'生成提示词');const area=document.createElement('textarea');area.rows=8;area.value=entry.text;area.dataset.promptEditor=String(index);area.setAttribute('aria-label',label.textContent);label.append(area);container.append(label);});
   $('promptDialog').showModal();
 }
 function promptEditorText(){const container=$('promptEditors'),settings=generationSettings();return [...container.querySelectorAll('[data-prompt-editor]')].map((area,index)=>'第'+(index+1)+'张生成提示词\n'+withNegativePrompt(area.value,settings.drafts[index]?.negativePrompt)).join('\n\n');}

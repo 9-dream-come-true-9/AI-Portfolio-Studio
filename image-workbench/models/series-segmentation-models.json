@@ -1,0 +1,18 @@
+{
+  "upstream": "https://github.com/SysCV/sam-hq",
+  "license": "SAM-HQ-LICENSE",
+  "models": [
+    {
+      "file": "sam_hq_vit_b_encoder.onnx",
+      "bytes": 358996853,
+      "sha256": "f66f6a9e76cea50126bb041fefe5ca4026675f867d930b651ed17d72784e6ca2",
+      "download": "https://github.com/CVHub520/X-AnyLabeling/releases/download/v2.0.0/sam_hq_vit_b_encoder.onnx"
+    },
+    {
+      "file": "sam_hq_vit_b_decoder.onnx",
+      "bytes": 20695346,
+      "sha256": "137c01c207a5e09b3729f989e8090f9574684220ab874c33ff2e6d9716aa9ad3",
+      "download": "https://github.com/CVHub520/X-AnyLabeling/releases/download/v2.0.0/sam_hq_vit_b_decoder.onnx"
+    }
+  ]
+}

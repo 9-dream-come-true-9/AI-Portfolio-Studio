@@ -11,6 +11,63 @@
   const text=value=>String(value??'');
   const unique=values=>[...new Set(values.filter(Boolean).map(text))];
   const warningText=value=>typeof value==='string'?value:text(value?.message||value?.label);
+  const visualKeys=['type','x','y','w','h','rotation','opacity','visible','src','text','fontSize','fontWeight','color','textAlign','textVerticalAlign','lineHeight','forceSeriesText'];
+  function sameAppearance(layer,baseline){return !!layer&&visualKeys.every(key=>layer[key]===baseline[key]||(typeof layer[key]==='number'&&typeof baseline[key]==='number'&&Math.abs(layer[key]-baseline[key])<.001));}
+  function preservation(project){return project.layers.find(layer=>layer.role==='series-background')?.seriesPreserve;}
+  function unchanged(project,layer){const original=preservation(project)?.slots.find(slot=>slot.layerId===layer.id);return !!original&&sameAppearance(layer,original.baseline);}
+  function attachPreservation(project,source,regions,baseline=project){
+    if(regions?.version!==1||!Array.isArray(regions.patches))throw Error('母图原画保护数据不完整。');
+    const background=project.layers.find(layer=>layer.role==='series-background');if(!background)throw Error('母图固定背景缺失。');
+    const slots=regions.patches.map(patch=>{const layer=baseline.layers.find(layer=>slotId(layer)===patch.id);if(!layer||!boxValid(patch.box))throw Error('母图替换区域与图层不匹配。');return{layerId:layer.id,baseline:copy(layer),box:copy(patch.box),src:imageSource(patch.src,'局部清理区域')};});
+    if(baseline.layers.some(layer=>slotId(layer)&&!slots.some(slot=>slot.layerId===layer.id)))throw Error('母图存在未经保护的识别图层，请重新识别母图。');
+    background.src=imageSource(source,'母图原画');background.seriesPreserve={version:1,slots};
+    project.meta.seriesLayout.preserveVersion=1;return project;
+  }
+  function upgradePreservation(project,previous,analysis,background,source,regions){
+    const old=buildTemplate({...previous,backgroundSrc:background}),fresh=buildTemplate({...analysis,backgroundSrc:background}),next=copy(project);
+    const accepted=new Set(fresh.layers.map(layer=>layer.groupId).filter(Boolean));
+    for(const prior of old.layers.filter(layer=>slotId(layer)&&!accepted.has(layer.groupId))){
+      const live=next.layers.find(layer=>layer.groupId===prior.groupId);if(!live)continue;
+      if(sameAppearance(live,prior))next.layers=next.layers.filter(layer=>layer!==live);
+      else delete live.groupId; // Preserve intentional user edits as custom layers.
+    }
+    for(const layer of fresh.layers.filter(layer=>slotId(layer))){
+      const prior=old.layers.find(other=>other.groupId===layer.groupId),live=next.layers.find(other=>other.groupId===layer.groupId);
+      if(live){
+        for(const key of visualKeys)if(prior&&(live[key]===prior[key]||(typeof live[key]==='number'&&typeof prior[key]==='number'&&Math.abs(live[key]-prior[key])<.001)))live[key]=layer[key];
+        layer.id=live.id;
+      }else if(prior)layer.id=prior.id;
+      else{if(next.layers.some(other=>other.id===layer.id))layer.id='series_upgrade_'+(root.crypto?.randomUUID?.()||Math.random().toString(36).slice(2));next.layers.push(copy(layer));}
+      const binding=fresh.meta.seriesLayout.slots.find(slot=>slot.id===slotId(layer));if(binding)binding.layerId=layer.id;
+    }
+    const known=new Set(fresh.meta.seriesLayout.slots.map(slot=>slot.id));
+    next.meta={...next.meta,seriesLayout:{...next.meta.seriesLayout,...fresh.meta.seriesLayout,slots:[...fresh.meta.seriesLayout.slots,...(next.meta.seriesLayout.slots||[]).filter(slot=>!known.has(slot.id)&&next.layers.some(layer=>slotId(layer)===slot.id))],geometryVersion:analysis.geometryVersion||0,layoutRevision:analysis.layoutRevision||0,backgroundRevision:project.meta?.seriesLayout?.backgroundRevision||analysis.backgroundRevision||1}};
+    return attachPreservation(next,source,regions,fresh);
+  }
+  function drawScene(editor,ctx,layers,editingId){
+    const background=layers.find(layer=>layer.role==='series-background'&&layer.seriesPreserve?.version===1);
+    if(!background){for(const layer of layers)if(layer.id!==editingId)editor._drawLayer(ctx,layer);return;}
+    editor._drawLayer(ctx,background);
+    const slots=background.seriesPreserve.slots,changed=new Set();
+    for(const slot of slots){const live=layers.find(layer=>layer.id===slot.layerId);if(live?.id===editingId||!sameAppearance(live,slot.baseline)){changed.add(slot.layerId);const patch=editor.images.get(slot.src)?.image;if(patch)ctx.drawImage(patch,slot.box.x,slot.box.y,slot.box.w,slot.box.h);}}
+    for(const layer of layers){if(layer===background||layer.id===editingId)continue;const original=slots.find(slot=>slot.layerId===layer.id);if(!original||changed.has(layer.id))editor._drawLayer(ctx,layer);}
+  }
+  function normalizeTypography(project,rows){
+    const next=copy(project),bindings=specs(project),measuring=new root.ImageEditor(document.createElement('canvas'));let changed=false;
+    for(const slot of bindings){
+      if(slot.kind!=='text'||!rows.some(row=>owns(row.values,slot.id)&&row.values[slot.id]!=null&&text(row.values[slot.id])!==slot.layer.text))continue;
+      const layer=next.layers.find(layer=>layer.id===slot.layerId),saved=next.meta.seriesLayout.slots.find(binding=>binding.id===slot.id);
+      const base=saved?.typographyResolvedFontSize===slot.layer.fontSize?saved.typographyBaseFontSize||slot.layer.fontSize:slot.layer.fontSize,original={...slot.layer,fontSize:base};
+      const candidates=unique([slot.layer.text,...rows.map(row=>owns(row.values,slot.id)&&row.values[slot.id]!=null?row.values[slot.id]:slot.layer.text)]),valid=[];let size=Math.min(base,slot.layer.fontSize);
+      for(const value of candidates){const candidate={...original,text:value};try{fitSlotText(measuring,candidate,slot,original);size=Math.min(size,candidate.fontSize);valid.push(value);}catch(error){if(error.code!=='SERIES_TEXT_FIT_OVERFLOW')throw error;}}
+      // Use one proven size for this field throughout the batch. Do not let a
+      // later batch repeatedly shrink the already-fitted size below its floor.
+      if(valid.some(value=>{try{fitSlotText(measuring,{...original,text:value,fontSize:size},slot,{...original,fontSize:size},{minimumScale:1});return false;}catch{return true;}}))size=Math.max(8,base*(slot.minFontScale||.85));
+      if(!layer.forceSeriesText||Math.abs(layer.fontSize-size)>.001)changed=true;layer.forceSeriesText=true;layer.fontSize=size;
+      if(saved){saved.typographyBaseFontSize=base;saved.typographyResolvedFontSize=size;}
+    }
+    return{project:next,changed};
+  }
   function dimensions(value){
     if(!Number.isInteger(value?.width)||!Number.isInteger(value?.height)||value.width<64||value.height<64||value.width>4096||value.height>4096)throw Error('母图画布尺寸须在 64 到 4096 像素之间。');
   }
@@ -42,6 +99,7 @@
       if(slot.kind==='text')binding.maxLines=Number.isInteger(slot.maxLines)&&slot.maxLines>0?slot.maxLines:Math.max(1,text(slot.text).split('\n').length);
       binding.minFontScale=Number.isFinite(slot.minFontScale)?Math.max(.75,Math.min(1,slot.minFontScale)):.85;
       if(slot.productFacts)binding.productFacts=copy(slot.productFacts);
+      if(slot.kind==='product'&&slot.pose&&boxValid(slot.pose)&&slot.sourceBox){binding.productPose=copy(slot.pose);binding.sourceBox=copy(slot.sourceBox);}
       if(binding.confidence!==null&&binding.confidence<.8)warnings.push('“'+binding.label+'”识别置信度较低，请在画布核对内容和位置。');
       const layer={id:binding.layerId,groupId:PREFIX+id,name:binding.label,type:slot.kind==='text'?'text':'image',role:slot.kind==='product'?'series-product':slot.kind==='image'?'series-image':'series-text',x:slot.x,y:slot.y,w:slot.w,h:slot.h,rotation:Number(slot.rotation)||0,opacity:1,visible:true,locked:false};
       if(slot.kind!=='text'){
@@ -65,19 +123,11 @@
     for(const binding of bindings){
       if(binding.kind!=='text')continue;
       const layer=layers.find(item=>item.id===binding.layerId);
-      const original=copy(layer);
-      try{fitSlotText(measuring,layer,binding,original);}
-      catch(error){
-        if(error.code!=='SERIES_TEXT_FIT_OVERFLOW')throw error;
-        // Keep a repairable mother document even when OCR's first text bounds
-        // are too small. The strict final compose check still blocks export.
-        layer.fontSize=original.fontSize;
-        binding.initialOverflowWarning='“'+binding.label+'”文字超出识别范围，已保留可编辑文字；请在母图画布扩大文字框或调整文案后再批量生成。';
-        warnings.push(binding.initialOverflowWarning);
-      }
+      repairTextBox(measuring,layer,binding,{...layout,layers});
       binding.initialTextHeight=layer.h;
     }
-    return {app:'ChunImageStudio',version:1,width:layout.width,height:layout.height,background:{type:'transparent',color:'#ffffff'},layers,selectedId:null,meta:{module:'sku',seriesLayout:{version:2,slots:bindings,warnings:unique(warnings),...(layout.productFacts?{productFacts:copy(layout.productFacts)}:{})}}};
+    const project={app:'ChunImageStudio',version:1,width:layout.width,height:layout.height,background:{type:'transparent',color:'#ffffff'},layers,selectedId:null,meta:{module:'sku',seriesLayout:{version:2,textFitVersion:3,geometryVersion:layout.geometryVersion||0,layoutRevision:layout.layoutRevision||0,backgroundRevision:layout.backgroundRevision||1,slots:bindings,warnings:unique(warnings),...(layout.productFacts?{productFacts:copy(layout.productFacts)}:{})}}};
+    return layout.preserve?attachPreservation(project,layout.originalSrc,layout.preserve):project;
   }
   function validateTemplate(project){
     dimensions(project);
@@ -105,13 +155,58 @@
     const scale=Math.min(box.w/width,box.h/height),w=width*scale,h=height*scale;
     return {x:box.x+(box.w-w)/2,y:box.y+(box.h-h)/2,w,h};
   }
-  function fitSlotText(editor,layer,binding,original){
+  function replacementProductBox(project,slot){
+    const original=preservation(project)?.slots.find(item=>item.layerId===slot.layerId)?.baseline,pose=slot.productPose,box=slot.sourceBox,layer=slot.layer;
+    if(!pose||!box||(original&&layer.src!==original.src))return layer;
+    const sx=layer.w/box.w,sy=layer.h/box.h;
+    const cx=layer.x+(pose.x+pose.w/2-box.x)*sx,cy=layer.y+(pose.y+pose.h/2-box.y)*sy,w=pose.w*sx,h=pose.h*sy;
+    return{x:cx-w/2,y:cy-h/2,w,h,rotation:(Number(layer.rotation)||0)+(Number(pose.rotation)||0)};
+  }
+  function inkMetrics(editor,layer){
+    const ctx=editor.ctx;
+    ctx.save();ctx.font=`${layer.fontWeight||600} ${layer.fontSize}px "Microsoft YaHei", "PingFang SC", sans-serif`;
+    ctx.textAlign=layer.textAlign||'left';
+    const lines=editor._lines(ctx,text(layer.text),layer.w),middle=layer.textVerticalAlign==='middle'||layer.textVerticalAlign==='bottom';
+    const layout=middle?editor.textLayout(layer,ctx):null;
+    ctx.textBaseline=middle?'alphabetic':'top';
+    const x=layer.textAlign==='center'?layer.w/2:layer.textAlign==='right'?layer.w:0;
+    let left=Infinity,top=Infinity,right=-Infinity,bottom=-Infinity;
+    lines.forEach((line,index)=>{
+      if(!line)return;
+      const metrics=ctx.measureText(line),y=middle?layout.baseline+index*layout.lineHeight:index*layer.fontSize*(layer.lineHeight||1.25);
+      const fallbackLeft=layer.textAlign==='center'?metrics.width/2:layer.textAlign==='right'?metrics.width:0;
+      const inkLeft=Number.isFinite(metrics.actualBoundingBoxLeft)?metrics.actualBoundingBoxLeft:fallbackLeft;
+      const inkRight=Number.isFinite(metrics.actualBoundingBoxRight)?metrics.actualBoundingBoxRight:metrics.width-fallbackLeft;
+      const ascent=Number.isFinite(metrics.actualBoundingBoxAscent)?metrics.actualBoundingBoxAscent:(middle?layer.fontSize*.8:0);
+      const descent=Number.isFinite(metrics.actualBoundingBoxDescent)?metrics.actualBoundingBoxDescent:(middle?layer.fontSize*.2:layer.fontSize);
+      left=Math.min(left,x-inkLeft);right=Math.max(right,x+inkRight);top=Math.min(top,y-ascent);bottom=Math.max(bottom,y+descent);
+    });
+    ctx.restore();
+    const series=layer.role==='series-text'||text(layer.groupId).startsWith(PREFIX),margin=series?1:0;
+    const insetOffset=(minimum,maximum,extent)=>{
+      if(!series||!Number.isFinite(minimum))return 0;
+      const low=margin-minimum,high=extent-margin-maximum;
+      // Right/bottom aligned text may need a small negative translation. When
+      // the ink is wider than the safe box, fit must still shrink it afterwards.
+      return low<=high?Math.max(low,Math.min(0,high)):low;
+    };
+    const offsetX=insetOffset(left,right,layer.w),offsetY=insetOffset(top,bottom,layer.h);
+    const inkLeft=left+offsetX,inkTop=top+offsetY,inkRight=right+offsetX,inkBottom=bottom+offsetY;
+    return {lines,rawLeft:left,rawTop:top,rawRight:right,rawBottom:bottom,offsetX,offsetY,inkLeft,inkTop,inkRight,inkBottom,left:inkLeft-margin,top:inkTop-margin,right:inkRight+margin,bottom:inkBottom+margin};
+  }
+  function textOverflows(editor,layer){
+    if(!layer.text)return false;
+    if(editor.textOverflows(layer))return true;
+    const ink=inkMetrics(editor,layer),tolerance=(layer.role==='series-text'||text(layer.groupId).startsWith(PREFIX)) ? 0.01 : 0.5;
+    return ink.left < -tolerance||ink.top < -tolerance||ink.right>layer.w+tolerance||ink.bottom>layer.h+tolerance;
+  }
+  function fitSlotText(editor,layer,binding,original,{minimumScale=binding.minFontScale||.85}={}){
     if(!layer.text)return;
-    const base=original.fontSize,min=Math.max(8,base*(binding.minFontScale||.85));
+    const base=original.fontSize,min=Math.max(8,base*minimumScale);
     const originalLines=Math.max(1,text(original.text).split('\n').length);
     const addedLines=binding.initialTextHeight?Math.max(0,Math.floor((original.h-binding.initialTextHeight+.01)/(base*(original.lineHeight||1.25)))):0;
     const maxLines=Math.max(binding.maxLines||1,originalLines)+addedLines;
-    const fits=()=>!editor.textOverflows(layer)&&editor.textLayout(layer).lines.length<=maxLines;
+    const fits=()=>!textOverflows(editor,layer)&&editor.textLayout(layer).lines.length<=maxLines;
     layer.fontSize=base;
     if(fits())return;
     // Only a small font adjustment is allowed; never rewrite text or move other slots.
@@ -126,6 +221,48 @@
       if(fits())low=mid;else high=mid;
     }
     layer.fontSize=Math.floor(low*100)/100;
+    // Browser glyph hinting is not perfectly continuous at fractional sizes.
+    // Recheck the saved value; the minimum was already proven safe above.
+    if(!fits())layer.fontSize=min;
+  }
+  function repairTextBox(editor,layer,binding,project){
+    if(!layer.text)return;
+    const original=copy(layer);
+    try{fitSlotText(editor,layer,binding,original);return;}
+    catch(error){if(error.code!=='SERIES_TEXT_FIT_OVERFLOW')throw error;}
+    Object.assign(layer,original);
+    // OCR reports ink bounds, not the full font line box. Borrow only free room
+    // to the right/bottom; preserve the user's anchor and every other layer.
+    if(!layer.rotation){
+      const ctx=editor.ctx;ctx.save();ctx.font=`${layer.fontWeight||600} ${layer.fontSize}px "Microsoft YaHei", "PingFang SC", sans-serif`;
+      const paragraphs=text(layer.text).split('\n'),naturalWidth=Math.max(...paragraphs.map(line=>ctx.measureText(line).width))+2;
+      ctx.restore();
+      const naturalHeight=layer.fontSize*(1+(paragraphs.length-1)*(layer.lineHeight||1.25))+Math.max(2,layer.fontSize*.08);
+      const gap=Math.max(2,Math.min(8,layer.fontSize*.1));
+      const others=project.layers.filter(other=>other.id!==layer.id&&other.role!=='series-background'&&shown(other)&&boxValid(other));
+      let right=project.width,bottom=project.height;
+      for(const other of others)if(other.y<original.y+original.h&&other.y+other.h>original.y&&other.x>=original.x+original.w-.5)right=Math.min(right,other.x-gap);
+      layer.w=Math.max(original.w,Math.min(naturalWidth,right-original.x));
+      for(const other of others)if(other.x<layer.x+layer.w&&other.x+other.w>layer.x&&other.y>=original.y+original.h-.5)bottom=Math.min(bottom,other.y-gap);
+      layer.h=Math.max(original.h,Math.min(naturalHeight,bottom-original.y));
+    }
+    // Initial OCR reconstruction is allowed to calibrate farther than a row
+    // replacement. All text must be present before this becomes a fixed master.
+    fitSlotText(editor,layer,binding,original,{minimumScale:0});
+    if(textOverflows(editor,layer))throw Error('“'+binding.label+'”无法在画布完整排下，请重新解析母图。');
+  }
+  function repairTemplate(project){
+    dimensions(project);
+    if(!Array.isArray(project.layers))throw Error('母图图层无效。');
+    const result=copy(project),bindings=specs(result),editor=new root.ImageEditor(document.createElement('canvas')),repairedIds=[];
+    for(const layer of result.layers){
+      if(layer.type!=='text'||!shown(layer)||unchanged(result,layer)||!textOverflows(editor,layer))continue;
+      const binding=bindings.find(slot=>slot.layerId===layer.id)||{id:layer.id,label:layer.name||'文字',maxLines:Math.max(1,text(layer.text).split('\n').length),minFontScale:.85};
+      repairTextBox(editor,layer,binding,result);binding.initialTextHeight=layer.h;repairedIds.push(layer.id);
+    }
+    const oldMeta=result.meta?.seriesLayout||{},resolved=new Set((oldMeta.slots||[]).map(slot=>slot.initialOverflowWarning).filter(Boolean));
+    result.meta={...(result.meta||{}),seriesLayout:{...oldMeta,textFitVersion:3,slots:bindings.map(({layer,...binding})=>binding),warnings:(oldMeta.warnings||[]).filter(warning=>!resolved.has(warning))}};
+    return {project:result,changed:repairedIds.length>0,repairedIds,warnings:result.meta.seriesLayout.warnings};
   }
   function capacity(textValue){
     const value=text(textValue).toLowerCase().replace(/ｍｌ/g,'ml').replace(/[×✕*]/g,'x');
@@ -145,6 +282,7 @@
     const parsed=capacity(facts.capacity||facts.capacityText||facts.labelCapacity||'');
     return parsed.volumes.length===1&&!parsed.total?parsed.volumes[0]:null;
   }
+  function slotCapacity(slot,value){const parsed=capacity(value);return !parsed.volumes.length&&/^\s*\d+(?:\.\d+)?\s*$/.test(text(value))&&capacity(slot.layer.text).volumes.length===1?capacity(text(value)+'ml'):parsed;}
   function checkProductFacts(template,row,bindings){
     bindings=bindings||validateTemplate(template);
     const warnings=[],productBindings=bindings.filter(slot=>slot.kind==='product');
@@ -154,12 +292,12 @@
     const specSlots=bindings.filter(slot=>slot.kind==='text'&&/(?:spec|capacity|volume|规格|容量|净含量)/i.test(slot.role+' '+slot.label));
     const changedSpecs=specSlots.filter(slot=>productChanged||(owns(row.values,slot.id)&&row.values[slot.id]!=null&&text(row.values[slot.id])!==slot.layer.text));
     if(productBindings.length===1)for(const slot of specSlots){
-      const wanted=capacity(owns(row.values,slot.id)&&row.values[slot.id]!=null?row.values[slot.id]:slot.layer.text);
+      const wanted=slotCapacity(slot,owns(row.values,slot.id)&&row.values[slot.id]!=null?row.values[slot.id]:slot.layer.text);
       if(wanted.units>1||(wanted.total&&wanted.volumes.length&&(!reliable||wanted.volumes.some(value=>value>known+.01))))warnings.push('“'+slot.label+'”使用多件或总量表述，但母图只有 1 个商品展示位置；请核对展示件数，图片不会自动复制商品。');
     }
     if(productBindings.length>1&&(changedSpecs.length||productChanged))return ['母图含多件商品，请分别核对每件容量、件数与组合规格；未用单件容量替代组合总量。'];
     for(const slot of changedSpecs){
-      const wanted=capacity(owns(row.values,slot.id)&&row.values[slot.id]!=null?row.values[slot.id]:slot.layer.text);
+      const wanted=slotCapacity(slot,owns(row.values,slot.id)&&row.values[slot.id]!=null?row.values[slot.id]:slot.layer.text);
       if(!wanted.volumes.length)continue;
       if(!reliable){warnings.push('“'+slot.label+'”已变更；尚不能确认商品包装容量，请核对瓶身与本行规格。');continue;}
       const distinct=unique(wanted.volumes).map(Number);
@@ -206,9 +344,9 @@
       const layer=project.layers.find(item=>item.id===slot.layerId);
       if(slot.kind==='text'&&owns(values,slot.id)&&values[slot.id]!=null)layer.text=values[slot.id];
       const source=owns(products,slot.id)?products[slot.id]:(slot===firstProduct?row.productSrc:null);
-      if(slot.kind==='product'&&source){
+      if(slot.kind==='product'&&source&&source!==layer.src){
         const image=await editor._image(imageSource(source,'替换商品'));
-        Object.assign(layer,fitProductBox(image.naturalWidth,image.naturalHeight,slot.layer),{src:source});delete layer.backgroundCutoutSrc;
+        const box=replacementProductBox(template,slot);Object.assign(layer,fitProductBox(image.naturalWidth,image.naturalHeight,box),{src:source,rotation:box.rotation||0});delete layer.backgroundCutoutSrc;
         if(layer.w/image.naturalWidth>2)warnings.push('商品素材分辨率偏低，放大后可能模糊，请换用高清原图。');
       }
       if(slot.kind==='image'&&images[slot.id]){
@@ -228,7 +366,7 @@
     // Canvas edits may have made an inherited or newly added text layer too long.
     // Validate every visible layer without changing content that this row inherits.
     for(const layer of editor.state.layers){
-      if(layer.type!=='text'||!shown(layer)||!editor.textOverflows(layer))continue;
+      if(layer.type!=='text'||!shown(layer)||unchanged(project,layer)||!textOverflows(editor,layer))continue;
       const binding=bindings.find(slot=>slot.layerId===layer.id);
       const error=Error('“'+(binding?.label||layer.name||'文字')+'”在母图画布中超出文字框，请精简文字或扩大文字框后再生成。');
       error.code='SERIES_TEXT_OVERFLOW';error.slotId=binding?.id||null;throw error;
@@ -243,5 +381,5 @@
     result.meta={...(project.meta||{}),seriesLayout:{...(project.meta?.seriesLayout||{}),version:2,slots:bindings.map(({layer,...slot})=>slot),warnings:unique(warnings)},seriesRowId:text(row.id)};
     return {project:result,src:preview?await dataURL(await editor.exportBlob('png')):null,warnings:unique(warnings)};
   }
-  root.SeriesLayout={buildTemplate,validateTemplate,compose,fitProductBox,fitImageBox,checkProductFacts,capacity,slotId,slots:project=>validateTemplate(project).map(({layer,...slot})=>slot)};
+  root.SeriesLayout={buildTemplate,repairTemplate,validateTemplate,compose,fitProductBox,fitImageBox,checkProductFacts,capacity,slotId,inkMetrics,textOverflows,attachPreservation,upgradePreservation,normalizeTypography,drawScene,unchanged,slots:project=>validateTemplate(project).map(({layer,...slot})=>slot)};
 })(window);
