@@ -1052,6 +1052,10 @@ html.dark .portfolio-note-bubble {
   font-style: normal;
 }
 
+.hero-title .hero-title-line {
+  font-size: 0.78em;
+}
+
 .hero-title .text-span {
   font-style: normal;
 }
