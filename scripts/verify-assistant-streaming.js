@@ -370,6 +370,21 @@ async function runHandler(message, ip, upstreams, history) {
       '残缺回答'
     );
 
+    const usageResult = await handler.streamModelAnswer(
+      createUpstream([
+        `data: ${JSON.stringify({
+          choices: [{ delta: { content: '统计测试' }, finish_reason: 'stop' }],
+          usage: { prompt_tokens: 42, completion_tokens: 7, total_tokens: 49, internal: 'ignored' }
+        })}\n\n`
+      ]),
+      createResponse()
+    );
+    assert.deepStrictEqual(usageResult.usage, {
+      prompt_tokens: 42,
+      completion_tokens: 7,
+      total_tokens: 49
+    }, 'Assistant timing logs may include token counts but must ignore unrelated provider metadata');
+
     console.log('Assistant MiMo routing, stream completion, and single-request checks passed.');
   } finally {
     global.fetch = originalFetch;

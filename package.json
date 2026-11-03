@@ -3,7 +3,7 @@
   "private": true,
   "version": "1.0.0",
   "scripts": {
-    "test": "node scripts/verify-assistant-callout.js && node scripts/verify-assistant-outside-dismiss.js && node scripts/verify-assistant-knowledge.js && node scripts/verify-assistant-streaming.js && node scripts/verify-assistant-markdown.js && node scripts/verify-assistant-errors.js && node scripts/verify-assistant-storage.js && node scripts/verify-capability-dialog.js && node scripts/verify-button-colors.js && node scripts/verify-toolchain.js && node scripts/verify-resume-download.js && node scripts/verify-resume-content.js && node scripts/verify-hero-layout.js && node scripts/verify-experience-details.js && node scripts/verify-github-access-dialog.js && node scripts/verify-preloader.js",
+    "test": "node scripts/verify-assistant-callout.js && node scripts/verify-assistant-outside-dismiss.js && node scripts/verify-assistant-knowledge.js && node scripts/verify-assistant-streaming.js && node scripts/verify-assistant-markdown.js && node scripts/verify-assistant-errors.js && node scripts/verify-assistant-storage.js && node scripts/verify-capability-dialog.js && node scripts/verify-button-colors.js && node scripts/verify-toolchain.js && node scripts/verify-resume-download.js && node scripts/verify-resume-content.js && node scripts/verify-hero-layout.js && node scripts/verify-experience-details.js && node scripts/verify-github-access-dialog.js && node scripts/verify-preloader.js && node scripts/verify-initial-scroll.js",
     "verify:assistant": "node scripts/verify-assistant-callout.js && node scripts/verify-assistant-outside-dismiss.js",
     "verify:knowledge": "node scripts/verify-assistant-knowledge.js",
     "verify:streaming": "node scripts/verify-assistant-streaming.js",

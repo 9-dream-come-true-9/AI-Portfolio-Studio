@@ -183,6 +183,15 @@ module.exports = async function handler(req, res) {
     { role: 'user', content: userMessage }
   ];
 
+  const requestStartedAt = Date.now();
+  const promptChars = messages.reduce(function (total, item) {
+    return total + String(item.content || '').length;
+  }, 0);
+  let providerResponseMs = null;
+  let firstContentMs = null;
+  let requestOutcome = 'upstream-error';
+  let loggedUsage = null;
+  let loggedFinishReason = null;
   let answer = '';
   let responseStarted = false;
   let thinkingStatusTimer = null;
@@ -196,6 +205,7 @@ module.exports = async function handler(req, res) {
       thinkingStatusTimer = null;
     }
 
+    const upstreamRequestStartedAt = Date.now();
     const upstream = await fetch(`${apiBase}/chat/completions`, {
         method: 'POST',
         signal: upstreamController.signal,
@@ -213,8 +223,10 @@ module.exports = async function handler(req, res) {
           ...getThinkingOptions(apiBase, model)
         })
       });
+      providerResponseMs = Date.now() - upstreamRequestStartedAt;
 
       if (!upstream.ok) {
+        requestOutcome = 'provider-error';
         await upstream.text().catch(() => '');
         if (!responseStarted) {
           // Provider failures must never masquerade as invalid visitor input.
@@ -252,12 +264,17 @@ module.exports = async function handler(req, res) {
       }
 
     try {
-      streamResult = await streamModelAnswer(upstream, res, stopThinkingStatusLoop);
+      streamResult = await streamModelAnswer(upstream, res, function () {
+        stopThinkingStatusLoop();
+        if (firstContentMs === null) firstContentMs = Date.now() - requestStartedAt;
+      });
     } catch (error) {
       if (error && error.partialAnswer) answer = error.partialAnswer;
       throw error;
     }
     answer = streamResult.answer;
+    loggedUsage = streamResult.usage;
+    loggedFinishReason = streamResult.finishReason || (streamResult.sawDone ? 'stop' : 'unknown');
 
     if (!streamResult.sawDone && !streamResult.finishReason) {
       throw new Error('AI stream ended before a completion signal');
@@ -266,6 +283,7 @@ module.exports = async function handler(req, res) {
     const normalFinish = streamResult.finishReason === 'stop'
       || (!streamResult.finishReason && streamResult.sawDone);
     const complete = normalFinish && streamResult.sawCompletionMarker && !isLikelyIncompleteAnswer(answer);
+    requestOutcome = complete ? 'complete' : 'incomplete';
     if (!answer) {
       answer = '暂时没有拿到有效回答，可以换个方式问我项目、经历或联系方式。';
       writeStreamEvent(res, 'delta', { delta: answer });
@@ -281,9 +299,11 @@ module.exports = async function handler(req, res) {
     // still needs to close the SSE response, otherwise the client can hang
     // until the platform function duration is exhausted.
     if (clientClosed || res.destroyed) {
+      requestOutcome = 'client-disconnected';
       return;
     }
     const timedOut = upstreamController.signal.aborted;
+    requestOutcome = timedOut ? 'timeout' : 'upstream-error';
     const failure = getUpstreamFailurePayload(timedOut);
     if (res.headersSent && !res.writableEnded) {
       writeStreamEvent(res, 'error', {
@@ -299,12 +319,27 @@ module.exports = async function handler(req, res) {
     if (thinkingStatusTimer) clearInterval(thinkingStatusTimer);
     clearTimeout(upstreamTimeout);
     res.removeListener('close', abortUpstream);
+    logAssistantTiming({
+      outcome: requestOutcome,
+      model,
+      provider_response_ms: providerResponseMs,
+      first_content_ms: firstContentMs,
+      first_content_after_provider_response_ms: providerResponseMs === null || firstContentMs === null
+        ? null
+        : Math.max(0, firstContentMs - providerResponseMs),
+      total_ms: Date.now() - requestStartedAt,
+      prompt_chars: promptChars,
+      history_messages: conversationHistory.length,
+      answer_chars: answer.length,
+      finish_reason: loggedFinishReason,
+      usage: loggedUsage
+    });
   }
 };
 
 async function streamModelAnswer(upstream, res, onFirstContent) {
   if (!upstream.body || typeof upstream.body.getReader !== 'function') {
-    return { answer: '', finishReason: null, sawDone: false, sawCompletionMarker: false };
+    return { answer: '', finishReason: null, sawDone: false, sawCompletionMarker: false, usage: null };
   }
 
   const reader = upstream.body.getReader();
@@ -314,6 +349,7 @@ async function streamModelAnswer(upstream, res, onFirstContent) {
   let finishReason = null;
   let sawDone = false;
   let sawCompletionMarker = false;
+  let usage = null;
 
   function consumeLine(line) {
     if (!line.startsWith('data:')) return;
@@ -336,6 +372,9 @@ async function streamModelAnswer(upstream, res, onFirstContent) {
       const upstreamError = new Error('Upstream stream returned an error');
       upstreamError.partialAnswer = stripModelThinking(answer);
       throw upstreamError;
+    }
+    if (payload && payload.usage && typeof payload.usage === 'object') {
+      usage = readTokenUsage(payload.usage);
     }
     const choice = payload && payload.choices && payload.choices[0]
       ? payload.choices[0]
@@ -396,8 +435,22 @@ async function streamModelAnswer(upstream, res, onFirstContent) {
     answer: stripModelThinking(answer),
     finishReason,
     sawDone,
-    sawCompletionMarker
+    sawCompletionMarker,
+    usage
   };
+}
+
+function readTokenUsage(value) {
+  const usage = {};
+  for (const field of ['prompt_tokens', 'completion_tokens', 'total_tokens']) {
+    if (Number.isFinite(value[field])) usage[field] = value[field];
+  }
+  return Object.keys(usage).length ? usage : null;
+}
+
+function logAssistantTiming(metrics) {
+  if (!isHostedProduction()) return;
+  console.info('[assistant-timing]', JSON.stringify(metrics));
 }
 
 function writeStreamEvent(res, event, payload) {
